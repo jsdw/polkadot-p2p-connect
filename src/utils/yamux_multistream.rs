@@ -1,14 +1,20 @@
 mod frame_buffer;
 
-use crate::utils::yamux::{self, YamuxSession, YamuxStreamId};
+use crate::utils::yamux::{self, YamuxSession};
 use crate::utils::{async_stream, varint};
-use std::collections::HashMap;
-
+use std::collections::{HashMap, VecDeque};
+use core::mem;
 use frame_buffer::{MultistreamFrameBuffer, MultistreamFrameBufferOutput};
+
+// Re-export public parts of this API.
+pub use yamux::YamuxStreamId;
+pub use yamux::Error as YamuxError;
+
+const MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE: &[u8] = b"/multistream/1.0.0\n";
 
 pub struct YamuxMultistream<S> {
     inner: YamuxSession<S>,
-    bufs: HashMap<YamuxStreamId, Multistream>
+    bufs: HashMap<YamuxStreamId, Multistream>,
 }
 
 pub struct Output {
@@ -17,8 +23,9 @@ pub struct Output {
 }
 
 pub enum OutputState {
-    IncomingProtocolNeedsAccepting(String),
-    IncomingHandshakeNeedsAccepting(Vec<u8>),
+    IncomingProtocol(String),
+    OutgoingRejected,
+    OutgoingAccepted(String),
     Data(Vec<u8>),
     Closed,
 }
@@ -32,24 +39,30 @@ struct Multistream {
 enum MultistreamState {
     NewIncoming,
     NewIncomingProtocol,
-    NewIncomingProtocolWaitingForProtocolAccept(String),
-    NewIncomingProtocolWaitingForHandshake,
-    NewIncomingProtocolWaitingForHandshakeAccept(Vec<u8>),
+    NewIncomingProtocolWaitingForAccept(String),
+    OutgoingProtocolWaitingForAccept { 
+        /// Have we seen the /multistream/1.0.0 header yet? Need this first.
+        seen_header: bool,
+        /// name of the current protocol we're trying.
+        current: String, 
+        /// Other protocols we will fall back to trying next.
+        rest: VecDeque<String> 
+    },
     Open,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("yamux error reading stream: {0}")]
-    Yamux(#[from] yamux::Error),
+    Yamux(#[from] YamuxError),
     #[error("failed to decode varint at the front of the next multistream frame")]
     VarintOutOfRange,
     #[error("could not find stream with ID {0}")]
     StreamNotFound(YamuxStreamId),
     #[error("we called accept_stream on stream {0} which is not waiting to be accepted")]
     StreamNotWaitingForAccept(YamuxStreamId),
-    #[error("we called accept_handshake on stream {0} which is not waiting for a handshake to be accepted")]
-    StreamNotWaitingForHandshakeAccept(YamuxStreamId),
+    #[error("we called open_stream and provided an empty list of protocols")]
+    NoProtocolsGiven,
 }
 
 impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
@@ -60,77 +73,65 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
         }
     }
 
-    pub fn open_notification_stream(&mut self, protocol: &str, handshake: &[u8]) -> Result<(), Error> {
-        self.inner.
+    /// Try to open a new outgoing stream, listing the protocols in order that we want to try.
+    pub fn open_stream<P: Into<String>>(&mut self, protocols: impl IntoIterator<Item=P>) -> Result<YamuxStreamId, Error> {
+        let mut protocols: VecDeque<String> = protocols.into_iter().map(|p| p.into()).collect();
+        let stream_id = self.inner.open_stream()?;
+
+        // Kick off the process with the first protocol, so that we can wait
+        // for appropriate messages and try the others. If no protocols were
+        // given then error immediately.
+        let Some(protocol) = protocols.pop_front() else {
+            return Err(Error::NoProtocolsGiven)
+        };
+        self.send_multistream_data(stream_id, MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE)?;
+        self.send_multistream_data_with_newline(stream_id, protocol.as_bytes())?;
+
+        self.bufs.insert(stream_id, Multistream { 
+            buffer: MultistreamFrameBuffer::new(), 
+            state: MultistreamState::OutgoingProtocolWaitingForAccept { 
+                seen_header: false,
+                current: protocol, 
+                rest: protocols 
+            },
+        });
+        Ok(stream_id)
     }
 
-    pub fn open_request_response_stream(&mut self, protocol: &str, request: &[u8]) -> Result<(), Error> {
+    /// Accept a stream for which [`OutputState::IncomingProtocol`] was emitted.
+    /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
+    pub fn accept_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
+        let Some(stream) = self.bufs.get_mut(&stream_id) else {
+            return Err(Error::StreamNotFound(stream_id))
+        };
+        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state else {
+            return Err(Error::StreamNotWaitingForAccept(stream_id))
+        };
 
+        // TODO: We can move send_multistream* fns to an inner object to avoid needing this clone.
+        let protocol_name = protocol_name.clone();
+
+        // Accepted; now we are "open" on this incoming stream
+        stream.state = MultistreamState::Open;
+        self.send_multistream_data_with_newline(stream_id, protocol_name.as_bytes())?;
+        Ok(())
     }
 
-    // /// Accept a stream for which [`OutputState::IncomingStreamNeedsAccepting`] was emitted.
-    // /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
-    // pub fn accept_protocol(&mut self, stream_id: YamuxStreamId, handshake: &[u8]) -> Result<(), Error> {
-    //     let Some(stream) = self.bufs.get_mut(&stream_id) else {
-    //         return Err(Error::StreamNotFound(stream_id))
-    //     };
-    //     let MultistreamState::NewIncomingProtocolWaitingForProtocolAccept(protocol_name) = &stream.state else {
-    //         return Err(Error::StreamNotWaitingForAccept(stream_id))
-    //     };
+    /// Reject a stream for which [`OutputState::IncomingProtocol`] was emitted.
+    /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
+    pub fn reject_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
+        let Some(stream) = self.bufs.get_mut(&stream_id) else {
+            return Err(Error::StreamNotFound(stream_id))
+        };
+        let MultistreamState::NewIncomingProtocolWaitingForAccept(_) = &stream.state else {
+            return Err(Error::StreamNotWaitingForAccept(stream_id))
+        };
 
-    //     // TODO: We can move send_multistream* fns to an inner object to avoid needing this clone.
-    //     let protocol_name = protocol_name.clone();
-
-    //     // Accepted; now we wait for handshake to come in and send out own handshake
-    //     stream.state = MultistreamState::NewIncomingProtocolWaitingForHandshake;
-    //     self.send_multistream_data_with_newline(stream_id, protocol_name.as_bytes())?;
-    //     self.send_multistream_data(stream_id, handshake)?;
-    //     Ok(())
-    // }
-
-    // /// Reject a stream for which [`OutputState::IncomingStreamNeedsAccepting`] was emitted.
-    // /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
-    // pub fn reject_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-    //     let Some(stream) = self.bufs.get_mut(&stream_id) else {
-    //         return Err(Error::StreamNotFound(stream_id))
-    //     };
-    //     let MultistreamState::NewIncomingProtocolWaitingForProtocolAccept(_) = &stream.state else {
-    //         return Err(Error::StreamNotWaitingForAccept(stream_id))
-    //     };
-
-    //     // Rejected; wait for another protocol suggestion on this stream and send the reject message.
-    //     stream.state = MultistreamState::NewIncomingProtocol;
-    //     self.send_multistream_data_with_newline(stream_id, b"na")?;
-    //     Ok(())
-    // }
-
-    // /// Accept an incoming streams handshake when [`OutputState::IncomingHandshakeNeedsAccepting`]. 
-    // /// This opens the incoming stream and from now we can begin receiving data on it.
-    // pub fn accept_handshake(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-    //     let Some(stream) = self.bufs.get_mut(&stream_id) else {
-    //         return Err(Error::StreamNotFound(stream_id))
-    //     };
-    //     let MultistreamState::NewIncomingProtocolWaitingForHandshakeAccept(_) = &stream.state else {
-    //         return Err(Error::StreamNotWaitingForHandshakeAccept(stream_id))
-    //     };
-
-    //     stream.state = MultistreamState::Open;
-    //     Ok(())
-    // }
-
-    // /// Reject an incoming streams handshake. This closes the stream.
-    // pub fn reject_handshake(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-    //     let Some(stream) = self.bufs.get_mut(&stream_id) else {
-    //         return Err(Error::StreamNotFound(stream_id))
-    //     };
-    //     let MultistreamState::NewIncomingProtocolWaitingForHandshakeAccept(_) = &stream.state else {
-    //         return Err(Error::StreamNotWaitingForHandshakeAccept(stream_id))
-    //     };
-
-    //     // Rejected; close stream
-    //     self.inner.close_stream(stream_id)?;
-    //     Ok(())
-    // }
+        // Rejected; wait for another protocol suggestion on this stream and send the reject message.
+        stream.state = MultistreamState::NewIncomingProtocol;
+        self.send_multistream_data_with_newline(stream_id, b"na")?;
+        Ok(())
+    }
 
     /// Drive our yamux multistream machine, returning output messages as they come in
     /// and pushing inputs out.
@@ -181,12 +182,12 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
             };
 
             // Handle the bytes depending on the stream state.
-            match entry.state {
+            match &mut entry.state {
                 // New incoming stream, so do the initial multistream protocol handshake.
                 MultistreamState::NewIncoming => {
-                    if bytes_equal_iter(b"/multistream/1.0.0\n", byte_iter) {
+                    if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
                         entry.state = MultistreamState::NewIncomingProtocol;
-                        self.send_multistream_data_with_newline(stream_id, b"/multistream/1.0.0")?;
+                        self.send_multistream_data(stream_id, MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE)?;
                     } else {
                         self.close_and_remove_stream_immediately(stream_id);
                     }
@@ -204,36 +205,56 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                         continue;
                     };
 
-                    entry.state = MultistreamState::NewIncomingProtocolWaitingForProtocolAccept(protocol_name.clone());
+                    entry.state = MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name.clone());
                     return Ok(Some(Output {
                         stream_id,
-                        state: OutputState::IncomingProtocolNeedsAccepting(protocol_name)
+                        state: OutputState::IncomingProtocol(protocol_name)
                     }))
                 },
                 // We got bytes on the stream, but we're still waiting for the user to
                 // accept it. So, just close the stream immediately and ignore the bytes.
-                MultistreamState::NewIncomingProtocolWaitingForProtocolAccept(_) => {
+                MultistreamState::NewIncomingProtocolWaitingForAccept(_) => {
                     drop(byte_iter);
                     self.close_and_remove_stream_immediately(stream_id);
                     continue;
                 },
-                // We've received handshake bytes now 
-                MultistreamState::NewIncomingProtocolWaitingForHandshake => {
-                    let handshake: Vec<u8> = byte_iter.collect();
-                    entry.state = MultistreamState::NewIncomingProtocolWaitingForHandshakeAccept(handshake.clone());
-                    return Ok(Some(Output {
-                        stream_id,
-                        state: OutputState::IncomingHandshakeNeedsAccepting(handshake)
-                    }))
+                // We initiated an outgoing stream and are waiting for them to accept/reject
+                // the protocol we proposed. They either accepted or they returned "na\n" to
+                // signal rejection
+                MultistreamState::OutgoingProtocolWaitingForAccept { seen_header, current, rest } => {
+                    if !*seen_header {
+                        // expect the multistream header first
+                        if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
+                            *seen_header = true;
+                        } else {
+                            self.close_and_remove_stream_immediately(stream_id);
+                        }
+                    } else {
+                        // multistream header seen so we are just negotiating the protocol name
+                        if bytes_equal_iter(current.as_bytes(), byte_iter) {
+                            // Protocol matches response; all good!
+                            let current = mem::take(current);
+                            entry.state = MultistreamState::Open;
+                            return Ok(Some(Output {
+                                stream_id,
+                                state: OutputState::OutgoingAccepted(current),
+                            }))
+                        } else {
+                            // Try the next protocol, rejecting if no protocols left to try
+                            if let Some(next) = rest.pop_front() {
+                                *current = next.clone();
+                                self.send_multistream_data_with_newline(stream_id, next.as_bytes())?;
+                            } else {
+                                self.close_and_remove_stream_immediately(stream_id);
+                                return Ok(Some(Output {
+                                    stream_id,
+                                    state: OutputState::OutgoingRejected,
+                                }))
+                            }
+                        }
+                    }
                 },
-                // We got bytes on the stream, but we're still waiting for the user to
-                // accept the handshake. So, just close the stream immediately and ignore the bytes.
-                MultistreamState::NewIncomingProtocolWaitingForHandshakeAccept(_) => {
-                    drop(byte_iter);
-                    self.close_and_remove_stream_immediately(stream_id);
-                    continue;
-                },
-                // Emit data from a stream.
+                // Emit any data received from a stream once multistream negotiations are complete.
                 MultistreamState::Open => {
                     let data = byte_iter.collect();
                     return Ok(Some(Output {
