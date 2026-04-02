@@ -15,7 +15,6 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::boxed::Box;
 use utils::{
-    async_stream,
     multistream,
     peer_id,
     noise,
@@ -26,6 +25,7 @@ use utils::{
 // Re-export anything that is part of the public APIs.
 pub use crate::utils::peer_id::PeerId;
 pub use crate::error::{ ConnectionError, StreamError, ProtocolError };
+pub use crate::utils::async_stream::AsyncStream;
 
 // -----------------------------------------------------------
 // Platform
@@ -69,13 +69,13 @@ impl <Platform: PlatformT> Configuration<Platform> {
     /// Connect to a peer given some read/write byte stream that has already been established with it.
     /// If we know the expected peer ID then we can use [`Self::connect_to_peer`] to provide this ID,
     /// which will then check that it is correct.
-    pub async fn connect<Stream: async_stream::AsyncStream>(&self, stream: Stream) -> Result<Connection<Stream, Platform>, ConnectionError> {
+    pub async fn connect<Stream: AsyncStream>(&self, stream: Stream) -> Result<Connection<Stream, Platform>, ConnectionError> {
         Connection::from_stream(stream, self.identity_secret, None).await
     }
 
     /// Connect to a peer given some read/write byte stream that has already been established with it,
     /// and the expected identity of the peer. If the identity does not match then the connection will be rejected.
-    pub async fn connect_to_peer<Stream: async_stream::AsyncStream>(&self, stream: Stream, peer_id: PeerId) -> Result<Connection<Stream, Platform>, ConnectionError> {
+    pub async fn connect_to_peer<Stream: AsyncStream>(&self, stream: Stream, peer_id: PeerId) -> Result<Connection<Stream, Platform>, ConnectionError> {
         Connection::from_stream(stream, self.identity_secret, Some(peer_id)).await
     }
 }
@@ -221,7 +221,7 @@ enum RequestState {
     AwaitingResponsePayload,
 }
 
-impl <Stream: async_stream::AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
+impl <Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
     async fn from_stream(
         mut stream: Stream, 
         identity_secret: Option<[u8; 32]>,

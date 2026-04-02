@@ -1,12 +1,15 @@
 use alloc::boxed::Box;
 
-/// Async byte-stream trait used by each layer of the protocol stack.
-/// WebSocket, Noise, and Yamux stream adapters all implement this.
+/// Async byte-stream trait. The underlying peer connection (for instance TCP or WebSocket) 
+/// should implement this, and then it can be passed to [`crate::Configuration::connect`]
+/// or similar to establish a connection to the peer.
 pub trait AsyncStream {
+    /// Read enough bytes from the stream to fill the given buffer.
     fn read_exact(
         &mut self,
         buf: &mut [u8],
     ) -> impl core::future::Future<Output = Result<(), Error>>;
+    /// Write the entirity of the given bytes to the stream.
     fn write_all(
         &mut self,
         data: &[u8],
