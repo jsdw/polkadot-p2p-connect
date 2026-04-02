@@ -1,3 +1,4 @@
+use super::SubscriptionId;
 use crate::utils::{
     multistream,
     noise,
@@ -13,6 +14,8 @@ pub enum ConnectionError {
     YamuxNegotiationTimeout,
     #[error("timeout exchanging noise handshakes")]
     NoiseHandshakeTimeout,
+    #[error("already subscribed to protocol")]
+    AlreadySubscribed(SubscriptionId),
     #[error("internal protocol error: {0}")]
     ProtocolError(#[from] ProtocolError),
 }
