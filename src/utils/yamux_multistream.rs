@@ -8,6 +8,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 use core::mem;
 use frame_buffer::{MultistreamFrameBuffer, MultistreamFrameBufferOutput};
 
+const LOG_TARGET: &str = "yamux_multistream";
+
 // Re-export public parts of this API.
 pub use yamux::YamuxStreamId;
 pub use yamux::Error as YamuxError;
@@ -84,7 +86,7 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// Try to open a new outgoing stream, listing the protocols in order that we want to try.
     pub fn open_stream<P: Into<String>>(&mut self, protocols: impl IntoIterator<Item=P>) -> Result<YamuxStreamId, Error> {
         let mut protocols: VecDeque<String> = protocols.into_iter().map(|p| p.into()).collect();
-        let stream_id = self.inner.open_stream()?;
+        let stream_id = self.inner.open_stream();
 
         // Kick off the process with the first protocol, so that we can wait
         // for appropriate messages and try the others. If no protocols were
@@ -115,14 +117,12 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
         let MultistreamState::Open = &stream.state else {
             return Err(Error::StreamNotOpen(stream_id))
         };
-
         self.send_multistream_data(stream_id, data)
     }
 
     /// Accept a stream for which [`OutputState::IncomingProtocol`] was emitted.
     /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
     pub fn accept_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-        tracing::debug!("[ym] accept_protocol({})", stream_id);
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
             return Err(Error::StreamNotFound(stream_id))
         };
@@ -134,6 +134,7 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
         let protocol_name = protocol_name.clone();
 
         // Accepted; now we are "open" on this incoming stream
+        tracing::debug!(target: LOG_TARGET, "protocol {protocol_name} accepted on stream {stream_id}");
         stream.state = MultistreamState::Open;
         self.send_multistream_data_with_newline(stream_id, protocol_name.as_bytes())?;
         Ok(())
@@ -142,15 +143,15 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// Reject a stream for which [`OutputState::IncomingProtocol`] was emitted.
     /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
     pub fn reject_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-        tracing::debug!("[ym] reject_protocol({})", stream_id);
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
             return Err(Error::StreamNotFound(stream_id))
         };
-        let MultistreamState::NewIncomingProtocolWaitingForAccept(_) = &stream.state else {
+        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state else {
             return Err(Error::StreamNotWaitingForAccept(stream_id))
         };
 
         // Rejected; wait for another protocol suggestion on this stream and send the reject message.
+        tracing::debug!(target: LOG_TARGET, "protocol {protocol_name} rejected on stream {stream_id}");
         stream.state = MultistreamState::NewIncomingProtocol;
         self.send_multistream_data_with_newline(stream_id, b"na")?;
         Ok(())
@@ -165,7 +166,6 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
 
     /// Close a stream immediately, unbuffering any messages buffered to send prior to this call.
     pub fn close_stream_immediately(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
-        tracing::debug!("[ym] close_stream_immediately({})", stream_id);
         self.bufs.remove(&stream_id);
         self.inner.close_stream_immediately(stream_id);
         Ok(())
@@ -189,11 +189,10 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
             let stream_id = output.stream_id;
             let bytes = match output.state {
                 yamux::OutputState::Data(bytes) => {
-                    tracing::debug!("[ym::next] stream {} Data({} bytes)", stream_id, bytes.len());
                     bytes
                 },
                 yamux::OutputState::ClosedByRemote => {
-                    tracing::debug!("[ym::next] stream {} ClosedByRemote", stream_id);
+                    tracing::debug!(target: LOG_TARGET, "stream {stream_id} closed by remote");
                     // Technically the stream may have been "half closed" (ie we can still send but they won't)
                     // or "full closed" (ie they won't send and we aren't allowed to), but I don't think we care
                     // here we so we just keep it simple and close all or nothing.
@@ -228,10 +227,11 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                 // New incoming stream, so do the initial multistream protocol handshake.
                 MultistreamState::NewIncoming => {
                     if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
-                        tracing::debug!("[ym::next] stream {} NewIncoming: header OK, echoing", stream_id);
+                        tracing::debug!(target: LOG_TARGET, "new incoming stream {stream_id} awaiting protocol suggestion");
                         entry.state = MultistreamState::NewIncomingProtocol;
                         self.send_multistream_data(stream_id, MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE)?;
                     } else {
+                        tracing::debug!(target: LOG_TARGET, "new incoming stream {stream_id} invalid protocol suggestion: closing");
                         self.close_stream_immediately(stream_id)?;
                     }
                 }
@@ -240,15 +240,17 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                 MultistreamState::NewIncomingProtocol => {
                     let mut protocol_bytes: Vec<u8> = byte_iter.collect();
                     if protocol_bytes.pop() != Some(b'\n') {
+                        tracing::debug!(target: LOG_TARGET, "invalid multistream protocol (no trailing newline): request to close stream {stream_id}");
                         self.close_stream_immediately(stream_id)?;
                         continue
                     }
                     let Ok(protocol_name) = String::from_utf8(protocol_bytes) else {
+                        tracing::debug!(target: LOG_TARGET, "invalid multistream protocol (not utf8): request to close stream {stream_id}");
                         self.close_stream_immediately(stream_id)?;
                         continue;
                     };
 
-                    tracing::debug!("[ym::next] stream {} NewIncomingProtocol: '{}'", stream_id, &protocol_name);
+                    tracing::debug!(target: LOG_TARGET, "incoming protocol {protocol_name} proposed on stream {stream_id}");
                     entry.state = MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name.clone());
                     return Ok(Some(Output {
                         stream_id,
@@ -258,7 +260,7 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                 // We got bytes on the stream, but we're still waiting for the user to
                 // accept it. So, just close the stream immediately and ignore the bytes.
                 MultistreamState::NewIncomingProtocolWaitingForAccept(_) => {
-                    tracing::debug!("[ym::next] stream {} WaitingForAccept: got more data, closing", stream_id);
+                    tracing::debug!(target: LOG_TARGET, "invalid multistream protocol (got bytes on stream waiting to be accepted): request to close stream {stream_id}");
                     drop(byte_iter);
                     self.close_stream_immediately(stream_id)?;
                     continue;
@@ -272,15 +274,15 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                         if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
                             *seen_header = true;
                         } else {
+                            tracing::debug!(target: LOG_TARGET, "invalid multistream header (2): request to close stream {stream_id}");
                             self.close_stream_immediately(stream_id)?;
                         }
                     } else {
                         // multistream header seen so we are just negotiating the protocol name
                         let current_with_newline = current.as_bytes().iter().copied().chain(Some(b'\n'));
                         if iters_equal(current_with_newline, byte_iter) {
-                            // Protocol matches response; all good!
+                            tracing::debug!(target: LOG_TARGET, "protocol {current} accepted by remote on stream {stream_id}");                            
                             let current = mem::take(current);
-                            tracing::debug!("[ym::next] stream {} OutgoingAccepted", stream_id);
                             entry.state = MultistreamState::Open;
                             return Ok(Some(Output {
                                 stream_id,
@@ -289,9 +291,11 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                         } else {
                             // Try the next protocol, rejecting if no protocols left to try
                             if let Some(next) = rest.pop_front() {
+                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, trying {next}, on stream {stream_id}");                            
                                 *current = next.clone();
                                 self.send_multistream_data_with_newline(stream_id, next.as_bytes())?;
                             } else {
+                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, request to close stream {stream_id}");                            
                                 self.close_stream_immediately(stream_id)?;
                                 return Ok(Some(Output {
                                     stream_id,
@@ -304,7 +308,6 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                 // Emit any data received from a stream once multistream negotiations are complete.
                 MultistreamState::Open => {
                     let data: Vec<u8> = byte_iter.collect();
-                    tracing::debug!("[ym::next] stream {} Open: Data({} bytes)", stream_id, data.len());
                     return Ok(Some(Output {
                         stream_id,
                         state: OutputState::Data(data)

@@ -1,3 +1,5 @@
+use core::fmt::Write;
+
 /// Yamux headers are 12 bytes exactly.
 const YAMUX_FRAME_HEADER_SIZE: usize = 12;
 
@@ -212,10 +214,31 @@ impl FrameFlags {
     pub fn contains(&self, flag: FrameFlag) -> bool {
         self.0 & (flag as u16) == (flag as u16)
     }
+    fn iter(&self) -> impl Iterator<Item=FrameFlag> {
+        let syn = self.contains(FrameFlag::Syn).then(|| FrameFlag::Syn);
+        let ack = self.contains(FrameFlag::Ack).then(|| FrameFlag::Ack);
+        let fin = self.contains(FrameFlag::Fin).then(|| FrameFlag::Fin);
+        let rst = self.contains(FrameFlag::Rst).then(|| FrameFlag::Rst);
+        syn.into_iter().chain(ack).chain(fin).chain(rst)
+    }
+}
+
+impl core::fmt::Display for FrameFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut fst = true;
+        for flag in self.iter() {
+            if !fst {
+                f.write_char('|')?;
+            }
+            fst = false;
+            flag.fmt(f)?;
+        }
+        Ok(())
+    }
 }
 
 /// Yamux frames have 0 or more flags to provide additional information.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum FrameFlag {
     /// Signals the start of a new stream
@@ -252,5 +275,16 @@ impl core::ops::BitOr<FrameFlag> for FrameFlags {
     type Output = FrameFlags;
     fn bitor(self, rhs: FrameFlag) -> Self::Output {
         FrameFlags(self.0 | rhs as u16)
+    }
+}
+
+impl core::fmt::Display for FrameFlag {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            FrameFlag::Syn => f.write_str("SYN"),
+            FrameFlag::Ack => f.write_str("ACK"),
+            FrameFlag::Fin => f.write_str("FIN"),
+            FrameFlag::Rst => f.write_str("RST"),
+        }
     }
 }
