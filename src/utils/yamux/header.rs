@@ -7,7 +7,7 @@ const YAMUX_FRAME_HEADER_SIZE: usize = 12;
 const YAMUX_VERSION: u8 = 0;
 
 /// A yamux frame header.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct YamuxHeader {
     version: u8,
     pub frame_type: FrameType,
@@ -286,5 +286,56 @@ impl core::fmt::Display for FrameFlag {
             FrameFlag::Fin => f.write_str("FIN"),
             FrameFlag::Rst => f.write_str("RST"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn roundtrip(header: YamuxHeader) {
+        let encoded = header.encode();
+        let decoded = YamuxHeader::decode(&encoded).unwrap();
+        assert_eq!(header, decoded);
+    }
+
+    #[test]
+    fn roundtrip_send_data() {
+        roundtrip(YamuxHeader::send_data(YamuxStreamId(5), 1024));
+    }
+
+    #[test]
+    fn roundtrip_open_stream() {
+        roundtrip(YamuxHeader::open_stream(YamuxStreamId(1)));
+    }
+
+    #[test]
+    fn roundtrip_accept_stream() {
+        roundtrip(YamuxHeader::accept_stream(YamuxStreamId(2)));
+    }
+
+    #[test]
+    fn roundtrip_reject_stream() {
+        roundtrip(YamuxHeader::reject_stream(YamuxStreamId(3)));
+    }
+
+    #[test]
+    fn roundtrip_pong() {
+        roundtrip(YamuxHeader::pong(YamuxStreamId(0), 0xDEADBEEF));
+    }
+
+    #[test]
+    fn roundtrip_window_update() {
+        roundtrip(YamuxHeader::window_update(YamuxStreamId(7), 65535));
+    }
+
+    #[test]
+    fn roundtrip_large_stream_id_and_length() {
+        roundtrip(YamuxHeader::send_data(YamuxStreamId(u32::MAX), u32::MAX));
+    }
+
+    #[test]
+    fn roundtrip_zero_values() {
+        roundtrip(YamuxHeader::send_data(YamuxStreamId(0), 0));
     }
 }
