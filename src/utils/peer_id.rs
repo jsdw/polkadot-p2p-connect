@@ -138,3 +138,61 @@ impl core::fmt::Debug for PeerId {
         write!(f, "PeerId({})", self.to_base58())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn known_peer_ids_are_valid() {
+        let known_ids = [
+            // From an AssetHub chain spec:
+            "12D3KooWG3GrM6XKMM4gp3cvemdwUvu96ziYoJmqmetLZBXE8bSa",
+            "12D3KooWMRyTLrCEPcAQD6c4EnudL3vVzg9zji3whvsMYPUYevpq",
+            "12D3KooWLHqbcQtoBygf7GJgVjVa3TaeLuf7VbicNdooaCmQM2JZ",
+            "12D3KooWNDrKSayoZXGGE2dRSFW2g1iGPq3fTZE2U39ma9yZGKd3",
+            "12D3KooWApa2JW4rbLtgzuK7fjLMupLS9HZheX9cdkQKyu6AnGrP",
+            "12D3KooWRsVeHqRs2iKmjLiguxp8myL4G2mDAWhtX2jHwyWujseV",
+            "12D3KooWFrQjYaPZSSLLxEVmoaHFcrF6VoY4awG4KRSLaqy3JCdQ",
+            "12D3KooWLwiJuvqQUB4kYaSjLenFKH9dWZhGZ4qi7pSb3sUYU651",
+            "12D3KooWKgwQfAeDoJARdtxFNNWfbYmcu6s4yUuSifnNoDgzHZgm",
+            "12D3KooWL8CyLww3m3pRySQGGYGNJhWDMqko3j5xi67ckP7hDUvo",
+            "12D3KooW9uybhguhDjVJc3U3kgZC3i8rWmAnSpbnJkmuR7C6ZsRW",
+            "12D3KooWByohP9FXn7ao8syS167qJsbFdpa7fY2Y24xbKtt3r7Ls",
+            "12D3KooWEFrNuNk8fPdQS2hf34Gmqi6dGSvrETshGJUrqrvfRDZr",
+            // From a Polkadot RC chain spec:
+            "12D3KooWSz8r2WyCdsfWHgPyvD8GKQdJ1UAiRmrcrs8sQB3fe2KU",
+            "12D3KooWFN2mhgpkJsDBuNuE5427AcDrsib8EoqGMZmkxWwx3Md4",
+            "12D3KooWKvdDyRKqUfSAaUCbYiLwKY8uK3wDWpCuy2FiDLbkPTDJ",
+            "12D3KooWCZKEvAMJRk9nwTHJcTjgVw6bDEqryQ3B7n7scNtfNqPB",
+            "12D3KooWMFwJV935CyJXE8twfkKxRDnNWeEFd8jZWaoWZF22Hv8S",
+            "12D3KooWS9ZcvRxyzrSf6p63QfTCWs12nLoNKhGux865crgxVA4H",
+            "12D3KooWT2HyZx5C6BBeLbCKhYG2SqJYuiu7sLMxGzUcQBko3BMr",
+            "12D3KooWPAVUgBaBk6n8SztLrMk8ESByncbAfRKUdxY1nygb9zG3",
+            "12D3KooWK4E16jKk9nRhvC4RfrDVgcZzExg8Q3Q2G7ABUUitks1w",
+            "12D3KooWRjHFApinuqSBjoaDjQHvxwubQSpEVy5hrgC9Smvh92WF",
+            "12D3KooWHJBMZgt7ymAdTRtadPcGXpJw79vBGe8z53r9JMkZW7Ha",
+            "12D3KooWFFqjBKoSdQniRpw1Y8W6kkV7takWv1DU2ZMkaA81PYVq",
+            "12D3KooWNwWNRrPrTk4qMah1YszudMjxNw2qag7Kunhw3Ghs9ea5",
+            "12D3KooWAb5MyC1UJiEQJk4Hg4B2Vi3AJdqSUhTGYUqSnEqCFMFg",
+            "12D3KooWPyEvPEXghnMC67Gff6PuZiSvfx3fmziKiPZcGStZ5xff",
+            "12D3KooWEjk6QXrZJ26fLpaajisJGHiz6WiQsR8k7mkM9GmWKnRZ",
+            "12D3KooWAdyiVAaeGdtBt6vn5zVetwA4z4qfm9Fi2QCSykN1wTBJ",
+            "12D3KooWT1PWaNdAwYrSr89dvStnoGdH3t4LNRbcVNN4JCtsotkR",
+            "12D3KooWEymrFRHz6c17YP3FAyd8kXS5gMRLgkW4U77ZJD2ZNCLZ",
+        ];
+
+        for id in known_ids {
+            let decoded_id = match PeerId::from_base58(id) {
+                Ok(id) => id,
+                Err(e) => {
+                    panic!("Peer ID {id} could not be decoded: {e}");
+                }
+            };
+
+            assert_eq!(decoded_id.to_base58(), id, "Round-trip decode/encode PeerId does not result in the same output");
+        }
+    }
+
+    
+}
