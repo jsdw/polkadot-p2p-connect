@@ -516,7 +516,13 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::utils::{mock_stream::{MockStream, MockStreamHandle}, yamux::header::FrameFlags};
+    use crate::{
+        AsyncStream, 
+        utils::{
+            mock_stream::{MockStream, MockStreamHandle}, 
+            yamux::header::FrameFlags
+        }
+    };
 
     /// Poll some async task, returning Some(result) if Poll::Ready
     /// and None if Poll::Pending.
@@ -540,6 +546,13 @@ mod test {
         }
     }
 
+    fn next_expecting_output<S: AsyncStream>(yamux: &mut YamuxSession<S>) -> Output<'_> {
+        block_on(yamux.next())
+            .expect("expecting Ready, not Pending, from YamuxSession::next()")
+            .expect("output should not be None")
+            .expect("output should not be Err")
+    }
+
     fn read_header(handle: &mut MockStreamHandle) -> YamuxHeader {
         YamuxHeader::decode(&handle.drain(YamuxHeader::SIZE).try_into().unwrap()).unwrap()
     }
@@ -558,17 +571,16 @@ mod test {
         handle.extend(data.iter().copied());
 
         // Now, when we call next(), we'll get back the sent data on our new stream.
-        let res = block_on(yamux.next())
-            .expect("expecting output from next()")
-            .expect("output should not be None")
-            .expect("output should not be Err");
-
+        let res = next_expecting_output(&mut yamux);
         assert_eq!(res.stream_id, YamuxStreamId::new(2));
         assert_eq!(res.state, OutputState::Data(data));
 
         // Our Yamux handler will have accepted the stream, replying.
         let response = read_header(&mut handle);
         assert_eq!(response, YamuxHeader::accept_stream(YamuxStreamId::new(2)));
+
+        // If we call next() again we'll get Pending back as we're waiting for more data
+        assert!(block_on(yamux.next()).is_none());
     }
 
     #[test]
@@ -592,16 +604,604 @@ mod test {
         handle.extend(data.iter().copied());
 
         // Now, when we call next(), we'll get back the sent data on our new stream.
-        let res = block_on(yamux.next())
-            .expect("expecting output from next()")
-            .expect("output should not be None")
-            .expect("output should not be Err");
-
+        let res = next_expecting_output(&mut yamux);
         assert_eq!(res.stream_id, YamuxStreamId::new(2));
         assert_eq!(res.state, OutputState::Data(data));
 
         // Our Yamux handler will have accepted the stream, replying.
         let response = read_header(&mut handle);
         assert_eq!(response, YamuxHeader::accept_stream(YamuxStreamId::new(2)));
+
+        // If we call next() again we'll get Pending back as we're waiting for more data
+        assert!(block_on(yamux.next()).is_none());
+    }
+
+    #[test]
+    fn ping_receives_pong() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // First open a stream so we have one active.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+
+        // Send a ping on the session ID (stream 0).
+        let ping = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::Ping,
+            flags: FrameFlags::empty(),
+            stream_id: YamuxStreamId::new(0),
+            length: 0xDEADBEEF,
+        };
+        handle.extend(ping.encode());
+
+        // Drive our yamux session.
+        let _ = block_on(yamux.next());
+
+        // We should have sent: accept stream, pong.
+        let accept = read_header(&mut handle);
+        assert_eq!(accept, YamuxHeader::accept_stream(YamuxStreamId::new(2)));
+        let pong = read_header(&mut handle);
+        assert_eq!(pong, YamuxHeader::pong(YamuxStreamId::new(0), 0xDEADBEEF));
+    }
+
+    #[test]
+    fn remote_fin_closes_stream() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a stream.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+
+        // Send data with FIN flag.
+        let data = b"goodbye";
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::Data,
+            flags: FrameFlag::Fin.into(),
+            stream_id: YamuxStreamId::new(2),
+            length: data.len() as u32,
+        };
+        handle.extend(header.encode());
+        handle.extend(data.iter().copied());
+
+        // First next() should return the data.
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Second next() should return ClosedByRemote (buffered from FIN).
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::ClosedByRemote);
+    }
+
+    #[test]
+    fn remote_rst_closes_stream() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a stream.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+
+        // Send a data frame with RST flag and some data.
+        let data = b"reset";
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::Data,
+            flags: FrameFlag::Rst.into(),
+            stream_id: YamuxStreamId::new(2),
+            length: data.len() as u32,
+        };
+        handle.extend(header.encode());
+        handle.extend(data.iter().copied());
+
+        // First next() should return the data.
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Second next() should return ClosedByRemote (buffered from RST).
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::ClosedByRemote);
+    }
+
+    #[test]
+    fn window_update_with_fin_returns_closed() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a stream first.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+
+        // Provide data on the stream so the open is processed.
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Now send a WindowUpdate with FIN.
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::WindowUpdate,
+            flags: FrameFlag::Fin.into(),
+            stream_id: YamuxStreamId::new(2),
+            length: 0,
+        };
+        handle.extend(header.encode());
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::ClosedByRemote);
+    }
+
+    #[test]
+    fn window_update_with_rst_returns_closed() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a stream.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        let _ = block_on(yamux.next());
+
+        // Send a WindowUpdate with RST.
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::WindowUpdate,
+            flags: FrameFlag::Rst.into(),
+            stream_id: YamuxStreamId::new(2),
+            length: 0,
+        };
+        handle.extend(header.encode());
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::ClosedByRemote);
+    }
+
+    #[test]
+    fn odd_stream_id_from_remote_is_rejected() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Remote tries to open stream with odd ID (only even IDs valid from remote).
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(3)).encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+
+        assert!(matches!(res, Err(Error::InvalidStreamId(id)) if id == YamuxStreamId::new(3)));
+    }
+
+    #[test]
+    fn session_id_zero_from_remote_is_rejected() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Remote tries to open stream with ID 0 (session ID, invalid).
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(0)).encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+
+        assert!(matches!(res, Err(Error::InvalidStreamId(id)) if id == YamuxStreamId::new(0)));
+    }
+
+    #[test]
+    fn duplicate_stream_id_from_remote_is_rejected() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open stream 2 normally.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"first";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        let _ = block_on(yamux.next());
+
+        // Remote tries to open stream 2 again.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+
+        assert!(matches!(res, Err(Error::InvalidStreamId(id)) if id == YamuxStreamId::new(2)));
+    }
+
+    #[test]
+    fn goaway_normal_termination_returns_none() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open stream so GoAway finds it.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        // Send GoAway with normal termination.
+        let goaway = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::GoAway,
+            flags: FrameFlags::empty(),
+            stream_id: YamuxStreamId::new(2),
+            length: GoAwayType::NormalTermination as u32,
+        };
+        handle.extend(goaway.encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output");
+        assert!(res.is_none(), "GoAway NormalTermination should yield None");
+    }
+
+    #[test]
+    fn goaway_internal_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        let goaway = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::GoAway,
+            flags: FrameFlags::empty(),
+            stream_id: YamuxStreamId::new(2),
+            length: GoAwayType::InternalError as u32,
+        };
+        handle.extend(goaway.encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::ServerInternalError)));
+    }
+
+    #[test]
+    fn goaway_protocol_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        let goaway = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::GoAway,
+            flags: FrameFlags::empty(),
+            stream_id: YamuxStreamId::new(2),
+            length: GoAwayType::ProtocolError as u32,
+        };
+        handle.extend(goaway.encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::ServerProtocolError)));
+    }
+
+    #[test]
+    fn goaway_unknown_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        let goaway = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::GoAway,
+            flags: FrameFlags::empty(),
+            stream_id: YamuxStreamId::new(2),
+            length: 0xFF,
+        };
+        handle.extend(goaway.encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::ServerUnknownError(0xFF))));
+    }
+
+    #[test]
+    fn data_after_fin_is_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open stream and send data with FIN, then more data (which is invalid).
+        // Push all frames upfront so the session can process them without pending.
+        let data = b"bye";
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::Data,
+            flags: FrameFlag::Syn | FrameFlag::Fin,
+            stream_id: YamuxStreamId::new(2),
+            length: data.len() as u32,
+        };
+        handle.extend(header.encode());
+        handle.extend(data.iter().copied());
+
+        let bad_data = b"bad";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), bad_data.len() as u32).encode());
+        handle.extend(bad_data.iter().copied());
+
+        // First call: returns the data from the FIN frame.
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Second call: returns ClosedByRemote (buffered from FIN).
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::ClosedByRemote);
+
+        // Third call: remote sent data after FIN, which is an error.
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::DataSentAfterFin(id)) if id == YamuxStreamId::new(2)));
+    }
+
+    #[test]
+    fn frame_too_large_is_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a stream.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        // Send a data header with length exceeding MAX_FRAME_SIZE.
+        let too_large = (MAX_FRAME_SIZE + 1) as u32;
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), too_large).encode());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::FrameTooLarge(n)) if n == MAX_FRAME_SIZE + 1));
+    }
+
+    #[test]
+    fn already_failed_after_error() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Cause an error: odd stream ID from remote.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(3)).encode());
+        let _ = block_on(yamux.next());
+
+        // Subsequent calls should return AlreadyFailed.
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None");
+        assert!(matches!(res, Err(Error::AlreadyFailed)));
+    }
+
+    #[test]
+    fn client_open_stream_sends_syn() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        let id = yamux.open_stream();
+        assert_eq!(id, YamuxStreamId::new(1));
+
+        // Provide something for next() to read so we drive send_buffered_data.
+        // Since nothing is available to read, next() will pend after flushing outbound.
+        let result = block_on(yamux.next());
+        assert!(result.is_none(), "should pend since no inbound data");
+
+        // Verify the SYN was written.
+        let hdr = read_header(&mut handle);
+        assert_eq!(hdr, YamuxHeader::open_stream(YamuxStreamId::new(1)));
+    }
+
+    #[test]
+    fn client_open_stream_ids_increment() {
+        let stream = MockStream::new();
+        let mut yamux = YamuxSession::new(stream);
+
+        let id1 = yamux.open_stream();
+        let id2 = yamux.open_stream();
+        let id3 = yamux.open_stream();
+
+        assert_eq!(id1, YamuxStreamId::new(1));
+        assert_eq!(id2, YamuxStreamId::new(3));
+        assert_eq!(id3, YamuxStreamId::new(5));
+    }
+
+    #[test]
+    fn send_data_on_nonexistent_stream_is_error() {
+        let stream = MockStream::new();
+        let mut yamux = YamuxSession::new(stream);
+
+        let res = yamux.send_data(YamuxStreamId::new(99), b"hello".iter().copied());
+        assert!(matches!(res, Err(Error::StreamNotFound(id)) if id == YamuxStreamId::new(99)));
+    }
+
+    #[test]
+    fn client_sends_data_on_stream() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        let id = yamux.open_stream();
+        yamux.send_data(id, b"hello".iter().copied()).unwrap();
+
+        // First drive sends the Open header (one buffered msg per stream per call).
+        let _ = block_on(yamux.next());
+        let open_hdr = read_header(&mut handle);
+        assert_eq!(open_hdr, YamuxHeader::open_stream(id));
+
+        // Second drive sends the Data header + payload.
+        let _ = block_on(yamux.next());
+        let data_hdr = read_header(&mut handle);
+        assert_eq!(data_hdr, YamuxHeader::send_data(id, 5));
+
+        let data_bytes = handle.drain(5);
+        assert_eq!(&data_bytes, b"hello");
+    }
+
+    #[test]
+    fn close_stream_sends_rst() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        let id = yamux.open_stream();
+        yamux.close_stream(id);
+
+        // First drive sends the Open header.
+        let _ = block_on(yamux.next());
+        let open_hdr = read_header(&mut handle);
+        assert_eq!(open_hdr, YamuxHeader::open_stream(id));
+
+        // Second drive sends the Close (RST).
+        let _ = block_on(yamux.next());
+        let close_hdr = read_header(&mut handle);
+        assert_eq!(close_hdr, YamuxHeader::reject_stream(id));
+    }
+
+    #[test]
+    fn close_stream_immediately_skips_buffered_data() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        let id = yamux.open_stream();
+        yamux.send_data(id, b"this should be dropped".iter().copied()).unwrap();
+        yamux.close_stream_immediately(id);
+
+        // Drive the session.
+        let _ = block_on(yamux.next());
+
+        // Should only see the RST, not the open or data.
+        let close_hdr = read_header(&mut handle);
+        assert_eq!(close_hdr, YamuxHeader::reject_stream(id));
+
+        // Nothing else should have been written.
+        let remaining = handle.drain_all();
+        assert!(remaining.is_empty(), "no other frames should be sent");
+    }
+
+    #[test]
+    fn multiple_streams_interleave() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Remote opens two streams, sends data on each.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data_a = b"stream2";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data_a.len() as u32).encode());
+        handle.extend(data_a.iter().copied());
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(4)).encode());
+        let data_b = b"stream4";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(4), data_b.len() as u32).encode());
+        handle.extend(data_b.iter().copied());
+
+        // First next: stream 2 data.
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None")
+            .expect("not Err");
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data_a));
+
+        // Second next: stream 4 data.
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None")
+            .expect("not Err");
+        assert_eq!(res.stream_id, YamuxStreamId::new(4));
+        assert_eq!(res.state, OutputState::Data(data_b));
+    }
+
+    #[test]
+    fn zero_length_data_frame_is_skipped() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open stream, then send a zero-length data frame, then a real one.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), 0).encode());
+        let data = b"real data";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        // Should skip the zero-length frame and return the real data.
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None")
+            .expect("not Err");
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+    }
+
+    #[test]
+    fn window_update_is_processed() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open a remote stream normally.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let data = b"x";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+        let _ = block_on(yamux.next());
+
+        // Send a window update followed by more data. The window update should
+        // be silently processed (no output) and then the data arrives normally.
+        handle.extend(YamuxHeader::window_update(YamuxStreamId::new(2), 4096).encode());
+        let data2 = b"after update";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data2.len() as u32).encode());
+        handle.extend(data2.iter().copied());
+
+        let res = block_on(yamux.next())
+            .expect("expecting output")
+            .expect("not None")
+            .expect("not Err");
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data2));
     }
 }
