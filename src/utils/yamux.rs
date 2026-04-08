@@ -66,6 +66,7 @@ pub struct YamuxSession<S> {
 }
 
 /// Some output about a stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Output<'a> {
     /// Of of this stream.
     pub stream_id: YamuxStreamId,
@@ -73,6 +74,7 @@ pub struct Output<'a> {
     pub state: OutputState<'a>
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputState<'a> {
     /// Some data was received on this stream. It may be a new stream.
     Data(&'a [u8]),
@@ -508,5 +510,98 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::utils::{mock_stream::{MockStream, MockStreamHandle}, yamux::header::FrameFlags};
+
+    /// Poll some async task, returning Some(result) if Poll::Ready
+    /// and None if Poll::Pending.
+    fn block_on<F: core::future::Future>(f: F) -> Option<F::Output> {
+        use core::task::{Context, Poll, Waker};
+        use alloc::task::Wake;
+        use alloc::sync::Arc;
+        use core::pin::pin;
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut f = pin!(f);
+        match f.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => Some(v),
+            Poll::Pending => None,
+        }
+    }
+
+    fn read_header(handle: &mut MockStreamHandle) -> YamuxHeader {
+        YamuxHeader::decode(&handle.drain(YamuxHeader::SIZE).try_into().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn new_streams_can_be_opened() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open, then send data.
+        let data = b"Hello world";
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        // Now, when we call next(), we'll get back the sent data on our new stream.
+        let res = block_on(yamux.next())
+            .expect("expecting output from next()")
+            .expect("output should not be None")
+            .expect("output should not be Err");
+
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Our Yamux handler will have accepted the stream, replying.
+        let response = read_header(&mut handle);
+        assert_eq!(response, YamuxHeader::accept_stream(YamuxStreamId::new(2)));
+    }
+
+    #[test]
+    fn new_streams_can_be_opened_with_data() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+
+        let mut yamux = YamuxSession::new(stream);
+
+        // Open and send data in one frame
+        let data = b"Hello world";
+        let header = YamuxHeader {
+            version: 0,
+            frame_type: FrameType::Data,
+            flags: FrameFlag::Syn.into(),
+            stream_id: YamuxStreamId::new(2),
+            length: data.len() as u32
+        };
+
+        handle.extend(header.encode());
+        handle.extend(data.iter().copied());
+
+        // Now, when we call next(), we'll get back the sent data on our new stream.
+        let res = block_on(yamux.next())
+            .expect("expecting output from next()")
+            .expect("output should not be None")
+            .expect("output should not be Err");
+
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data));
+
+        // Our Yamux handler will have accepted the stream, replying.
+        let response = read_header(&mut handle);
+        assert_eq!(response, YamuxHeader::accept_stream(YamuxStreamId::new(2)));
     }
 }

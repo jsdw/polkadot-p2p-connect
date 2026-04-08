@@ -9,7 +9,7 @@ const YAMUX_VERSION: u8 = 0;
 /// A yamux frame header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct YamuxHeader {
-    version: u8,
+    pub version: u8,
     pub frame_type: FrameType,
     pub flags: FrameFlags,
     pub stream_id: YamuxStreamId,
@@ -133,6 +133,10 @@ pub enum YamuxHeaderDecodeError {
 pub struct YamuxStreamId(u32);
 
 impl YamuxStreamId {
+    /// Create a new stream ID with a specific value.
+    pub fn new(value: u32) -> Self {
+        YamuxStreamId(value)
+    }
     /// Return the first stream ID for clients to use (always an odd number)
     pub fn first() -> Self {
         YamuxStreamId(1)
