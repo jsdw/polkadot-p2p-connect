@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use crate::PlatformT;
@@ -377,6 +376,7 @@ impl snow::resolvers::CryptoResolver for CryptoResolver {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
 
     /// Minimal single-threaded executor for tests.
     /// All our mock I/O completes immediately, so Pending is never expected.
