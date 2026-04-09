@@ -8,7 +8,7 @@ use core::cell::RefCell;
 /// be used in single threaded contexts for exampels and testing.
 #[derive(Debug, Default)]
 pub struct MockStream {
-    inner: Rc<RefCell<MockStreamInner>>
+    inner: Rc<RefCell<MockStreamInner>>,
 }
 
 /// The handle to a [`MockStream`]. This can write data to the buffer that is
@@ -16,7 +16,7 @@ pub struct MockStream {
 /// buffer that is written too when [`MockStream::write_all`] is called.
 #[derive(Debug, Clone)]
 pub struct MockStreamHandle {
-    inner: Rc<RefCell<MockStreamInner>>
+    inner: Rc<RefCell<MockStreamInner>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -33,14 +33,16 @@ impl MockStream {
             inner: Rc::new(RefCell::new(MockStreamInner {
                 read_buf: Default::default(),
                 write_buf: Default::default(),
-            }))
+            })),
         }
     }
 
     /// Create a handle to this [`MockStream`] which allows bytes to be read
     /// and written through it.
     pub fn handle(&self) -> MockStreamHandle {
-        MockStreamHandle { inner: self.inner.clone() }
+        MockStreamHandle {
+            inner: self.inner.clone(),
+        }
     }
 }
 

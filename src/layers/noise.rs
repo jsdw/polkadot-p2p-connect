@@ -1,13 +1,10 @@
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use alloc::collections::VecDeque;
 use crate::PlatformT;
 use crate::utils::async_stream::{self, AsyncStream};
+use crate::utils::peer_id::{Identity, PeerId, verify_ed25519};
 use crate::utils::protobuf;
-use crate::utils::peer_id::{
-    Identity, PeerId,
-    verify_ed25519,
-};
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
 const NOISE_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const STATIC_KEY_DOMAIN: &[u8] = b"noise-libp2p-static-key:";
@@ -32,7 +29,7 @@ pub enum Error {
         got: PeerId,
     },
     #[error("invalid identity signature from remote")]
-    InvalidIdentitySignatureFromRemote
+    InvalidIdentitySignatureFromRemote,
 }
 
 /// Perform the Noise XX handshake as the dialer (initiator).
@@ -54,14 +51,13 @@ pub async fn handshake_dialer<S: AsyncStream, P: PlatformT>(
         .expect("has not been called previously")
         .build_initiator()?;
 
-    
     // -- Message 1: -> e (empty payload) ------------------------------------
     {
         let mut buf = [0u8; MAX_NOISE_MSG];
         let len = noise.write_message(&[], &mut buf)?;
         send_frame(&mut stream, &buf[..len]).await?;
     }
-    
+
     // -- Message 2: <- e, ee, s, es (listener identity) ---------------------
     let noise_payload = {
         let mut buf = [0u8; MAX_NOISE_MSG];
@@ -79,14 +75,16 @@ pub async fn handshake_dialer<S: AsyncStream, P: PlatformT>(
         .ok_or_else(|| Error::RemoveStaticKeyNotAvailable)?;
     let signed_msg: Vec<u8> = [STATIC_KEY_DOMAIN, remote_static].concat();
     if !verify_ed25519(&noise_payload.key, &signed_msg, &noise_payload.signature) {
-        return Err(Error::InvalidIdentitySignatureFromRemote)
+        return Err(Error::InvalidIdentitySignatureFromRemote);
     }
 
     let remote_peer_id = PeerId::from_ed25519_public_key(noise_payload.key);
-    if let Some(expected) = expected_peer_id && &remote_peer_id != expected {
-        return Err(Error::RemotePeerIdMismatch { 
-            expected: expected.clone(), 
-            got: remote_peer_id
+    if let Some(expected) = expected_peer_id
+        && &remote_peer_id != expected
+    {
+        return Err(Error::RemotePeerIdMismatch {
+            expected: expected.clone(),
+            got: remote_peer_id,
         });
     }
 
@@ -96,15 +94,15 @@ pub async fn handshake_dialer<S: AsyncStream, P: PlatformT>(
         let signed_msg: Vec<u8> = [STATIC_KEY_DOMAIN, dh_keys.public.as_slice()].concat();
         let len = NoiseHandshakePayload {
             key: identity.public_key_bytes(),
-            signature: identity.sign(&signed_msg)
-        }.to_protobuf(&mut buf);
+            signature: identity.sign(&signed_msg),
+        }
+        .to_protobuf(&mut buf);
         let msg = &buf[..len];
 
         let mut buf = [0u8; MAX_NOISE_MSG];
         let len = noise.write_message(msg, &mut buf)?;
         send_frame(&mut stream, &buf[..len]).await?;
     }
-
 
     // Transition to transport mode.
     let transport = noise.into_transport_mode()?;
@@ -166,19 +164,18 @@ impl NoiseHandshakePayload {
         // extract the ed25519 key bytes (or error if a different format).
         let key = Self::decode_ed25519_public_key_protobuf(key_protobuf)?;
 
-        Ok(Self {
-            key,
-            signature,
-        })
+        Ok(Self { key, signature })
     }
 
     /// Decode the outermost noise payload message into a protobuf encoded key and a signature.
-    fn decode_outer_noise_payload_protobuf(data: &[u8]) -> Result<(&[u8], [u8; 64]), NoiseHandshakeFromProtobufError> {
+    fn decode_outer_noise_payload_protobuf(
+        data: &[u8],
+    ) -> Result<(&[u8], [u8; 64]), NoiseHandshakeFromProtobufError> {
         struct NoiseVisitor<'a> {
             identity_key: Option<&'a [u8]>,
             identity_sig: Option<&'a [u8]>,
         }
-        impl <'input> protobuf::Visitor<'input> for NoiseVisitor<'input> {
+        impl<'input> protobuf::Visitor<'input> for NoiseVisitor<'input> {
             fn data(&mut self, field_id: u64, bytes: &'input [u8]) {
                 if field_id == 1 {
                     self.identity_key = Some(bytes);
@@ -187,37 +184,48 @@ impl NoiseHandshakePayload {
                 }
             }
         }
-    
-        let mut visitor = NoiseVisitor { identity_key: None, identity_sig: None };
+
+        let mut visitor = NoiseVisitor {
+            identity_key: None,
+            identity_sig: None,
+        };
         protobuf::decode(&mut &*data, &mut visitor)?;
-    
+
         let signature: [u8; 64] = if let Some(sig_bytes) = visitor.identity_sig {
-            sig_bytes.try_into().map_err(|_| NoiseHandshakeFromProtobufError::InvalidSignatureLength(sig_bytes.len()))?
+            sig_bytes.try_into().map_err(|_| {
+                NoiseHandshakeFromProtobufError::InvalidSignatureLength(sig_bytes.len())
+            })?
         } else {
-            return Err(NoiseHandshakeFromProtobufError::InvalidNoisePayload(data.to_vec()))
+            return Err(NoiseHandshakeFromProtobufError::InvalidNoisePayload(
+                data.to_vec(),
+            ));
         };
 
         let key: &[u8] = if let Some(key_bytes) = visitor.identity_key {
             key_bytes
         } else {
-            return Err(NoiseHandshakeFromProtobufError::InvalidNoisePayload(data.to_vec()))
+            return Err(NoiseHandshakeFromProtobufError::InvalidNoisePayload(
+                data.to_vec(),
+            ));
         };
 
         Ok((key, signature))
     }
 
     /// Decode a protobuf encoded `PublicKey`, returning the raw 32-byte Ed25519 key.
-    fn decode_ed25519_public_key_protobuf(data: &[u8]) -> Result<[u8; 32], NoiseHandshakeFromProtobufError> {
+    fn decode_ed25519_public_key_protobuf(
+        data: &[u8],
+    ) -> Result<[u8; 32], NoiseHandshakeFromProtobufError> {
         struct KeyVisitor<'a> {
             ty: Option<u64>,
-            value: Option<&'a [u8]>
+            value: Option<&'a [u8]>,
         }
-        impl <'input> protobuf::Visitor<'input> for KeyVisitor<'input> {
+        impl<'input> protobuf::Visitor<'input> for KeyVisitor<'input> {
             fn varint(&mut self, field_id: u64, n: u64) {
                 if field_id == 1 {
                     self.ty = Some(n);
                 }
-            } 
+            }
             fn data(&mut self, field_id: u64, bytes: &'input [u8]) {
                 if field_id == 2 {
                     self.value = Some(bytes);
@@ -225,14 +233,19 @@ impl NoiseHandshakePayload {
             }
         }
 
-        let mut visitor = KeyVisitor { ty: None, value: None };
+        let mut visitor = KeyVisitor {
+            ty: None,
+            value: None,
+        };
         protobuf::decode(&mut &*data, &mut visitor)?;
 
         let (Some(1), Some(key_data)) = (visitor.ty, visitor.value) else {
-            return Err(NoiseHandshakeFromProtobufError::InvalidKey(data.to_vec()))
+            return Err(NoiseHandshakeFromProtobufError::InvalidKey(data.to_vec()));
         };
         if key_data.len() != 32 {
-            return Err(NoiseHandshakeFromProtobufError::InvalidKeyLength(key_data.len()));
+            return Err(NoiseHandshakeFromProtobufError::InvalidKeyLength(
+                key_data.len(),
+            ));
         }
 
         let mut out = [0u8; 32];
@@ -249,11 +262,14 @@ async fn send_frame(stream: &mut impl AsyncStream, data: &[u8]) -> Result<(), as
     let mut buf = [0u8; MAX_NOISE_MSG + 2];
     buf[..2].copy_from_slice(&(data.len() as u16).to_be_bytes());
     buf[2..data.len() + 2].copy_from_slice(data);
-    stream.write_all(&buf[.. data.len() + 2]).await?;
+    stream.write_all(&buf[..data.len() + 2]).await?;
     Ok(())
 }
 
-async fn recv_frame(stream: &mut impl AsyncStream, out: &mut [u8]) -> Result<usize, async_stream::Error> {
+async fn recv_frame(
+    stream: &mut impl AsyncStream,
+    out: &mut [u8],
+) -> Result<usize, async_stream::Error> {
     // How many bytes will we read
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf).await?;
@@ -293,30 +309,33 @@ impl<S: AsyncStream> AsyncStream for NoiseStream<S> {
         while buf_pos < buf.len() {
             if !self.read_buf.is_empty() {
                 //// Drain bytes from our internal buffer first.
-                
+
                 // How many bytes to read from our buffer?
                 let n = usize::min(self.read_buf.len(), buf.len() - buf_pos);
-                
+
                 // Drain these bytes and push to the buffer
                 for (i, b) in self.read_buf.drain(..n).enumerate() {
                     buf[buf_pos + i] = b;
                 }
-                
+
                 buf_pos += n;
             } else {
                 //// If the internal buffer is empty then read another frame on the wire.
-                
-                // Read a frame.                
+
+                // Read a frame.
                 let mut encrypted_buf = [0u8; MAX_NOISE_MSG];
                 let frame_len = recv_frame(&mut self.inner, &mut encrypted_buf).await?;
 
                 // Decrypt them via snow
                 let mut decrypted_buf = [0u8; MAX_NOISE_MSG];
-                let decrypted_len = self.transport.read_message(&encrypted_buf[..frame_len], &mut decrypted_buf)
+                let decrypted_len = self
+                    .transport
+                    .read_message(&encrypted_buf[..frame_len], &mut decrypted_buf)
                     .map_err(async_stream::Error::read_exact)?;
 
                 // Push them to our buffer
-                self.read_buf.extend(decrypted_buf[..decrypted_len].iter().copied());
+                self.read_buf
+                    .extend(decrypted_buf[..decrypted_len].iter().copied());
             }
         }
         Ok(())
@@ -326,7 +345,9 @@ impl<S: AsyncStream> AsyncStream for NoiseStream<S> {
         let mut encrypt_buf = [0u8; MAX_NOISE_MSG];
         for chunk in data.chunks(MAX_PLAINTEXT) {
             // Encrypt each outgoing message.
-            let encrypted_len = self.transport.write_message(chunk, &mut encrypt_buf[..])
+            let encrypted_len = self
+                .transport
+                .write_message(chunk, &mut encrypt_buf[..])
                 .map_err(async_stream::Error::write_all)?;
 
             // And then send it.
@@ -344,7 +365,7 @@ impl<S: AsyncStream> AsyncStream for NoiseStream<S> {
 struct CryptoResolver(fn(&mut [u8]));
 
 impl CryptoResolver {
-    /// Bridge PlatformT's RNG into snow's [`snow::resolvers::CryptoResolver`] so that snow 
+    /// Bridge PlatformT's RNG into snow's [`snow::resolvers::CryptoResolver`] so that snow
     /// can generate ephemeral keys even in a no_std environment without getrandom.
     fn from_platform<P: PlatformT>() -> Self {
         CryptoResolver(P::fill_with_random_bytes)
@@ -365,10 +386,16 @@ impl snow::resolvers::CryptoResolver for CryptoResolver {
     fn resolve_dh(&self, choice: &snow::params::DHChoice) -> Option<Box<dyn snow::types::Dh>> {
         snow::resolvers::DefaultResolver.resolve_dh(choice)
     }
-    fn resolve_hash(&self, choice: &snow::params::HashChoice) -> Option<Box<dyn snow::types::Hash>> {
+    fn resolve_hash(
+        &self,
+        choice: &snow::params::HashChoice,
+    ) -> Option<Box<dyn snow::types::Hash>> {
         snow::resolvers::DefaultResolver.resolve_hash(choice)
     }
-    fn resolve_cipher(&self, choice: &snow::params::CipherChoice) -> Option<Box<dyn snow::types::Cipher>> {
+    fn resolve_cipher(
+        &self,
+        choice: &snow::params::CipherChoice,
+    ) -> Option<Box<dyn snow::types::Cipher>> {
         snow::resolvers::DefaultResolver.resolve_cipher(choice)
     }
 }
@@ -376,8 +403,8 @@ impl snow::resolvers::CryptoResolver for CryptoResolver {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::utils::testing::{MockStream, block_on as block_on_inner};
     use alloc::vec;
-    use crate::utils::testing::{block_on as block_on_inner, MockStream};
 
     fn block_on<F: core::future::Future>(f: F) -> F::Output {
         block_on_inner(f).expect("future returned Pending in mock-I/O test")
@@ -402,25 +429,17 @@ mod test {
     fn make_transport_pair() -> (snow::TransportState, snow::TransportState) {
         let params: snow::params::NoiseParams = NOISE_PARAMS.parse().unwrap();
 
-        let builder_i = snow::Builder::with_resolver(
-            params.clone(), Box::new(test_resolver()),
-        );
+        let builder_i = snow::Builder::with_resolver(params.clone(), Box::new(test_resolver()));
         let kp_i = builder_i.generate_keypair().unwrap();
-        let mut initiator = snow::Builder::with_resolver(
-            params.clone(), Box::new(test_resolver()),
-        )
+        let mut initiator = snow::Builder::with_resolver(params.clone(), Box::new(test_resolver()))
             .local_private_key(&kp_i.private)
             .unwrap()
             .build_initiator()
             .unwrap();
 
-        let builder_r = snow::Builder::with_resolver(
-            params.clone(), Box::new(test_resolver()),
-        );
+        let builder_r = snow::Builder::with_resolver(params.clone(), Box::new(test_resolver()));
         let kp_r = builder_r.generate_keypair().unwrap();
-        let mut responder = snow::Builder::with_resolver(
-            params, Box::new(test_resolver()),
-        )
+        let mut responder = snow::Builder::with_resolver(params, Box::new(test_resolver()))
             .local_private_key(&kp_r.private)
             .unwrap()
             .build_responder()
@@ -499,7 +518,9 @@ mod test {
         let (ti, tr) = make_transport_pair();
 
         // Exceeds MAX_PLAINTEXT, so writer must produce 2 Noise frames.
-        let plaintext: Vec<u8> = (0..(MAX_PLAINTEXT + 100)).map(|i| (i % 256) as u8).collect();
+        let plaintext: Vec<u8> = (0..(MAX_PLAINTEXT + 100))
+            .map(|i| (i % 256) as u8)
+            .collect();
         let writer_mock = MockStream::new();
         let writer_handle = writer_mock.handle();
         let mut writer = NoiseStream::new(writer_mock, ti);

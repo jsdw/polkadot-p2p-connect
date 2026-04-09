@@ -1,8 +1,8 @@
+use crate::utils::async_stream::{self, AsyncStream};
+use crate::utils::varint;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::utils::async_stream::{self, AsyncStream};
-use crate::utils::varint;
 
 const MULTISTREAM_HEADER: &[u8] = b"/multistream/1.0.0";
 const MULTISTREAM_MAX_MSG_BYTES: u64 = 16384;
@@ -26,14 +26,11 @@ pub enum Error {
     #[error("the proposed protocol is not valid utf8: {0:?}")]
     ProposedProtocolIsNotUtf8(Vec<u8>),
     #[error("the remote suggested protocol {0} but we do not support it")]
-    ProtocolNotSupported(String)
+    ProtocolNotSupported(String),
 }
 
 /// Dialer-side multistream-select: propose a single protocol.
-pub async fn negotiate_dialer(
-    stream: &mut impl AsyncStream,
-    protocol: &str,
-) -> Result<(), Error> {
+pub async fn negotiate_dialer(stream: &mut impl AsyncStream, protocol: &str) -> Result<(), Error> {
     // Send header + proposal in one write (common optimisation)
     let mut msgs = Vec::new();
     encode_msg(MULTISTREAM_HEADER, &mut msgs);
@@ -43,16 +40,16 @@ pub async fn negotiate_dialer(
     // Read header echo
     let resp = read_msg(stream).await?;
     if resp != MULTISTREAM_HEADER {
-        return Err(Error::BadMultiStreamHeader(to_string(&resp)))
+        return Err(Error::BadMultiStreamHeader(to_string(&resp)));
     }
 
     // Read protocol echo (accepted) or "na\n" (rejected)
     let resp = read_msg(stream).await?;
     if resp == b"na" {
-        return Err(Error::MultistreamNotSupported)
+        return Err(Error::MultistreamNotSupported);
     }
     if resp != protocol.as_bytes() {
-        return Err(Error::UnexpectedResponse(to_string(&resp)))
+        return Err(Error::UnexpectedResponse(to_string(&resp)));
     }
 
     Ok(())
@@ -68,7 +65,7 @@ fn encode_msg(payload: &[u8], out: &mut Vec<u8>) {
 async fn read_msg(stream: &mut impl AsyncStream) -> Result<Vec<u8>, Error> {
     let length = varint::decode_from_stream(stream).await?;
     if length > MULTISTREAM_MAX_MSG_BYTES {
-        return Err(Error::MessageTooLarge(length))
+        return Err(Error::MessageTooLarge(length));
     }
     let mut buf = vec![0u8; length as usize];
     stream.read_exact(&mut buf).await?;
@@ -76,7 +73,7 @@ async fn read_msg(stream: &mut impl AsyncStream) -> Result<Vec<u8>, Error> {
     // Expect and remove a newline at the end.
     let last_byte = buf.pop();
     if last_byte.is_none() || matches!(last_byte, Some(n) if n != b'\n') {
-        return Err(Error::MessageMustEndInNewline(to_string(&buf)))
+        return Err(Error::MessageMustEndInNewline(to_string(&buf)));
     }
 
     Ok(buf)

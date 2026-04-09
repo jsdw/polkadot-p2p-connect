@@ -5,10 +5,10 @@ pub use mock_stream::{MockStream, MockStreamHandle};
 /// Poll some async task, returning Some(result) if Poll::Ready
 /// and None if Poll::Pending.
 pub fn block_on<F: core::future::Future>(f: F) -> Option<F::Output> {
-    use core::task::{Context, Poll, Waker};
-    use alloc::task::Wake;
     use alloc::sync::Arc;
+    use alloc::task::Wake;
     use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
 
     struct NoopWaker;
     impl Wake for NoopWaker {

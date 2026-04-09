@@ -7,7 +7,10 @@ const I32_LEN: usize = 4;
 
 /// A quick protobuf encode helper.
 pub fn encode<'a>(out: &'a mut [u8]) -> Encoder<'a> {
-    Encoder { start_len: out.len(), out }
+    Encoder {
+        start_len: out.len(),
+        out,
+    }
 }
 
 pub struct Encoder<'a> {
@@ -15,7 +18,7 @@ pub struct Encoder<'a> {
     start_len: usize,
 }
 
-impl <'a> Encoder<'a> {
+impl<'a> Encoder<'a> {
     pub fn encode_varint(mut self, field_id: u64, value: impl Into<u64>) -> Self {
         self.encode_field_id_and_wire_type(field_id, WireType::Varint);
         // Encode value as varint
@@ -61,7 +64,10 @@ impl <'a> Encoder<'a> {
 }
 
 /// Decode some protobuf bytes.
-pub fn decode<'input, V: Visitor<'input>>(cursor: &mut &'input [u8], visitor: &mut V) -> Result<(), Error> {
+pub fn decode<'input, V: Visitor<'input>>(
+    cursor: &mut &'input [u8],
+    visitor: &mut V,
+) -> Result<(), Error> {
     while !cursor.is_empty() {
         let tag_val = varint::decode(cursor)?;
         // everything but the smallest 3 bits are the field number
@@ -74,14 +80,14 @@ pub fn decode<'input, V: Visitor<'input>>(cursor: &mut &'input [u8], visitor: &m
             WireType::Varint => {
                 let val = varint::decode(cursor)?;
                 visitor.varint(field_number, val);
-            },
+            }
             // i64 (fixed 8 bytes)
             WireType::I64 => {
                 let Some(bytes) = cursor.get(0..I64_LEN) else {
                     return Err(Error::UnexpectedEndOfInput {
                         need: I64_LEN,
-                        got: cursor.len()
-                    })
+                        got: cursor.len(),
+                    });
                 };
                 let bytes: [u8; I64_LEN] = bytes.try_into().unwrap();
                 *cursor = &cursor[I64_LEN..];
@@ -93,8 +99,8 @@ pub fn decode<'input, V: Visitor<'input>>(cursor: &mut &'input [u8], visitor: &m
                 let Some(bytes) = cursor.get(0..val) else {
                     return Err(Error::UnexpectedEndOfInput {
                         need: val,
-                        got: cursor.len()
-                    })
+                        got: cursor.len(),
+                    });
                 };
                 *cursor = &cursor[val..];
                 visitor.data(field_number, bytes);
@@ -108,19 +114,15 @@ pub fn decode<'input, V: Visitor<'input>>(cursor: &mut &'input [u8], visitor: &m
                 let Some(bytes) = cursor.get(0..I32_LEN) else {
                     return Err(Error::UnexpectedEndOfInput {
                         need: I32_LEN,
-                        got: cursor.len()
-                    })
+                        got: cursor.len(),
+                    });
                 };
                 let bytes: [u8; I32_LEN] = bytes.try_into().unwrap();
                 *cursor = &cursor[I32_LEN..];
                 visitor.i32(field_number, bytes);
-            },
-            // Invalid wire type
-            WireType::Unknown(n) => {
-                return Err(Error::InvalidWireType {
-                    got: n
-                })
             }
+            // Invalid wire type
+            WireType::Unknown(n) => return Err(Error::InvalidWireType { got: n }),
         }
     }
     Ok(())
@@ -140,14 +142,9 @@ pub enum Error {
     #[error("failed to decode varint: {0}")]
     Varint(#[from] varint::Error),
     #[error("unexpected end of input; need {need} bytes but have {got}")]
-    UnexpectedEndOfInput {
-        need: usize,
-        got: usize
-    },
+    UnexpectedEndOfInput { need: usize, got: usize },
     #[error("invalid/unknown wire type {got}")]
-    InvalidWireType {
-        got: u8
-    }
+    InvalidWireType { got: u8 },
 }
 
 /// The protobuf wire type
@@ -214,16 +211,28 @@ mod test {
 
     impl<'input> Visitor<'input> for CollectVisitor {
         fn varint(&mut self, field_id: u64, n: u64) {
-            self.fields.push(Field { id: field_id, value: FieldValue::Varint(n) });
+            self.fields.push(Field {
+                id: field_id,
+                value: FieldValue::Varint(n),
+            });
         }
         fn i64(&mut self, field_id: u64, n: [u8; 8]) {
-            self.fields.push(Field { id: field_id, value: FieldValue::I64(n) });
+            self.fields.push(Field {
+                id: field_id,
+                value: FieldValue::I64(n),
+            });
         }
         fn i32(&mut self, field_id: u64, n: [u8; 4]) {
-            self.fields.push(Field { id: field_id, value: FieldValue::I32(n) });
+            self.fields.push(Field {
+                id: field_id,
+                value: FieldValue::I32(n),
+            });
         }
         fn data(&mut self, field_id: u64, bytes: &'input [u8]) {
-            self.fields.push(Field { id: field_id, value: FieldValue::Data(bytes.to_vec()) });
+            self.fields.push(Field {
+                id: field_id,
+                value: FieldValue::Data(bytes.to_vec()),
+            });
         }
     }
 
@@ -329,7 +338,13 @@ mod test {
         decode(&mut cursor, &mut v).unwrap();
         assert!(cursor.is_empty());
         assert_eq!(v.fields.len(), 1);
-        assert_eq!(v.fields[0], Field { id: 1, value: FieldValue::Varint(150) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 1,
+                value: FieldValue::Varint(150)
+            }
+        );
     }
 
     #[test]
@@ -340,7 +355,13 @@ mod test {
         decode(&mut cursor, &mut v).unwrap();
         assert!(cursor.is_empty());
         assert_eq!(v.fields.len(), 1);
-        assert_eq!(v.fields[0], Field { id: 2, value: FieldValue::Data(b"hello".to_vec()) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 2,
+                value: FieldValue::Data(b"hello".to_vec())
+            }
+        );
     }
 
     #[test]
@@ -350,7 +371,13 @@ mod test {
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
         assert!(cursor.is_empty());
-        assert_eq!(v.fields[0], Field { id: 1, value: FieldValue::I64([1, 2, 3, 4, 5, 6, 7, 8]) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 1,
+                value: FieldValue::I64([1, 2, 3, 4, 5, 6, 7, 8])
+            }
+        );
     }
 
     #[test]
@@ -360,7 +387,13 @@ mod test {
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
         assert!(cursor.is_empty());
-        assert_eq!(v.fields[0], Field { id: 3, value: FieldValue::I32([0xAA, 0xBB, 0xCC, 0xDD]) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 3,
+                value: FieldValue::I32([0xAA, 0xBB, 0xCC, 0xDD])
+            }
+        );
     }
 
     #[test]
@@ -379,7 +412,13 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 5, value: FieldValue::Varint(12345) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 5,
+                value: FieldValue::Varint(12345)
+            }]
+        );
     }
 
     #[test]
@@ -389,7 +428,13 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 10, value: FieldValue::Data(payload.to_vec()) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 10,
+                value: FieldValue::Data(payload.to_vec())
+            }]
+        );
     }
 
     #[test]
@@ -399,7 +444,13 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 7, value: FieldValue::I64(val) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 7,
+                value: FieldValue::I64(val)
+            }]
+        );
     }
 
     #[test]
@@ -409,29 +460,71 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 4, value: FieldValue::I32(val) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 4,
+                value: FieldValue::I32(val)
+            }]
+        );
     }
 
     #[test]
     fn round_trip_multiple_fields() {
         let bytes = encode_to_vec(|e| {
             e.encode_varint(1, 42u64)
-             .encode_data(2, b"abc")
-             .encode_i32(3, [0x01, 0x02, 0x03, 0x04])
-             .encode_i64(4, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80])
-             .encode_varint(5, 0u64)
-             .encode_data(6, &[])
+                .encode_data(2, b"abc")
+                .encode_i32(3, [0x01, 0x02, 0x03, 0x04])
+                .encode_i64(4, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80])
+                .encode_varint(5, 0u64)
+                .encode_data(6, &[])
         });
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
         assert_eq!(v.fields.len(), 6);
-        assert_eq!(v.fields[0], Field { id: 1, value: FieldValue::Varint(42) });
-        assert_eq!(v.fields[1], Field { id: 2, value: FieldValue::Data(b"abc".to_vec()) });
-        assert_eq!(v.fields[2], Field { id: 3, value: FieldValue::I32([0x01, 0x02, 0x03, 0x04]) });
-        assert_eq!(v.fields[3], Field { id: 4, value: FieldValue::I64([0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]) });
-        assert_eq!(v.fields[4], Field { id: 5, value: FieldValue::Varint(0) });
-        assert_eq!(v.fields[5], Field { id: 6, value: FieldValue::Data(vec![]) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 1,
+                value: FieldValue::Varint(42)
+            }
+        );
+        assert_eq!(
+            v.fields[1],
+            Field {
+                id: 2,
+                value: FieldValue::Data(b"abc".to_vec())
+            }
+        );
+        assert_eq!(
+            v.fields[2],
+            Field {
+                id: 3,
+                value: FieldValue::I32([0x01, 0x02, 0x03, 0x04])
+            }
+        );
+        assert_eq!(
+            v.fields[3],
+            Field {
+                id: 4,
+                value: FieldValue::I64([0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80])
+            }
+        );
+        assert_eq!(
+            v.fields[4],
+            Field {
+                id: 5,
+                value: FieldValue::Varint(0)
+            }
+        );
+        assert_eq!(
+            v.fields[5],
+            Field {
+                id: 6,
+                value: FieldValue::Data(vec![])
+            }
+        );
     }
 
     #[test]
@@ -441,7 +534,13 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 1000, value: FieldValue::Varint(99) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 1000,
+                value: FieldValue::Varint(99)
+            }]
+        );
     }
 
     #[test]
@@ -450,7 +549,13 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         decode(&mut cursor, &mut v).unwrap();
-        assert_eq!(v.fields, &[Field { id: 1, value: FieldValue::Varint(u64::MAX) }]);
+        assert_eq!(
+            v.fields,
+            &[Field {
+                id: 1,
+                value: FieldValue::Varint(u64::MAX)
+            }]
+        );
     }
 
     // =================== Decode error cases ===================
@@ -462,7 +567,10 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         let err = decode(&mut cursor, &mut v).unwrap_err();
-        assert!(matches!(err, Error::UnexpectedEndOfInput { need: 8, got: 3 }));
+        assert!(matches!(
+            err,
+            Error::UnexpectedEndOfInput { need: 8, got: 3 }
+        ));
     }
 
     #[test]
@@ -472,7 +580,10 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         let err = decode(&mut cursor, &mut v).unwrap_err();
-        assert!(matches!(err, Error::UnexpectedEndOfInput { need: 4, got: 2 }));
+        assert!(matches!(
+            err,
+            Error::UnexpectedEndOfInput { need: 4, got: 2 }
+        ));
     }
 
     #[test]
@@ -482,7 +593,10 @@ mod test {
         let mut cursor = &bytes[..];
         let mut v = CollectVisitor::default();
         let err = decode(&mut cursor, &mut v).unwrap_err();
-        assert!(matches!(err, Error::UnexpectedEndOfInput { need: 10, got: 3 }));
+        assert!(matches!(
+            err,
+            Error::UnexpectedEndOfInput { need: 10, got: 3 }
+        ));
     }
 
     #[test]
@@ -517,8 +631,20 @@ mod test {
         decode(&mut cursor, &mut v).unwrap();
         // Group tag should be silently skipped; we should see field 1 and field 3.
         assert_eq!(v.fields.len(), 2);
-        assert_eq!(v.fields[0], Field { id: 1, value: FieldValue::Varint(42) });
-        assert_eq!(v.fields[1], Field { id: 3, value: FieldValue::Varint(99) });
+        assert_eq!(
+            v.fields[0],
+            Field {
+                id: 1,
+                value: FieldValue::Varint(42)
+            }
+        );
+        assert_eq!(
+            v.fields[1],
+            Field {
+                id: 3,
+                value: FieldValue::Varint(99)
+            }
+        );
     }
 
     #[test]
@@ -550,7 +676,11 @@ mod test {
         for field_id in 1u64..=15 {
             let bytes = encode_to_vec(|e| e.encode_varint(field_id, 0u64));
             // Single-byte tag + single-byte value(0) = 2 bytes
-            assert_eq!(bytes.len(), 2, "field_id {field_id} should have single-byte tag");
+            assert_eq!(
+                bytes.len(),
+                2,
+                "field_id {field_id} should have single-byte tag"
+            );
         }
     }
 

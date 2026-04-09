@@ -1,18 +1,18 @@
 mod frame_buffer;
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::layers::yamux::{self, YamuxSession};
 use crate::utils::{async_stream, varint};
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::mem;
 use frame_buffer::MultistreamFrameBuffer;
 
 const LOG_TARGET: &str = "yamux_multistream";
 
 // Re-export public parts of this API.
-pub use yamux::YamuxStreamId;
 pub use yamux::Error as YamuxError;
+pub use yamux::YamuxStreamId;
 
 const MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE: &[u8] = b"/multistream/1.0.0\n";
 
@@ -27,7 +27,7 @@ pub struct YamuxMultistream<S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     pub stream_id: YamuxStreamId,
-    pub state: OutputState
+    pub state: OutputState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub enum OutputState {
 #[derive(Debug)]
 struct Multistream {
     buffer: MultistreamFrameBuffer,
-    state: MultistreamState
+    state: MultistreamState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,13 +54,13 @@ enum MultistreamState {
     NewIncoming,
     NewIncomingProtocol,
     NewIncomingProtocolWaitingForAccept(String),
-    OutgoingProtocolWaitingForAccept { 
+    OutgoingProtocolWaitingForAccept {
         /// Have we seen the /multistream/1.0.0 header yet? Need this first.
         seen_header: bool,
         /// name of the current protocol we're trying.
-        current: String, 
+        current: String,
         /// Other protocols we will fall back to trying next.
-        rest: VecDeque<String> 
+        rest: VecDeque<String>,
     },
     Open,
 }
@@ -75,13 +75,15 @@ pub enum Error {
     StreamNotFound(YamuxStreamId),
     #[error("we called accept_stream on stream {0} which is not waiting to be accepted")]
     StreamNotWaitingForAccept(YamuxStreamId),
-    #[error("we called send_data on stream {0} which is not ready for data yet (still negotiating protocol)")]
+    #[error(
+        "we called send_data on stream {0} which is not ready for data yet (still negotiating protocol)"
+    )]
     StreamNotOpen(YamuxStreamId),
     #[error("we called open_stream and provided an empty list of protocols")]
     NoProtocolsGiven,
 }
 
-impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
+impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
     pub fn new(yamux_session: YamuxSession<S>) -> Self {
         Self {
             inner: yamux_session,
@@ -91,7 +93,10 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     }
 
     /// Try to open a new outgoing stream, listing the protocols in order that we want to try.
-    pub fn open_stream<P: Into<String>>(&mut self, protocols: impl IntoIterator<Item=P>) -> Result<YamuxStreamId, Error> {
+    pub fn open_stream<P: Into<String>>(
+        &mut self,
+        protocols: impl IntoIterator<Item = P>,
+    ) -> Result<YamuxStreamId, Error> {
         let mut protocols: VecDeque<String> = protocols.into_iter().map(|p| p.into()).collect();
         let stream_id = self.inner.open_stream();
 
@@ -99,19 +104,22 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
         // for appropriate messages and try the others. If no protocols were
         // given then error immediately.
         let Some(protocol) = protocols.pop_front() else {
-            return Err(Error::NoProtocolsGiven)
+            return Err(Error::NoProtocolsGiven);
         };
         self.send_multistream_data(stream_id, MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE)?;
         self.send_multistream_data_with_newline(stream_id, protocol.as_bytes())?;
 
-        self.bufs.insert(stream_id, Multistream { 
-            buffer: MultistreamFrameBuffer::new(), 
-            state: MultistreamState::OutgoingProtocolWaitingForAccept { 
-                seen_header: false,
-                current: protocol, 
-                rest: protocols 
+        self.bufs.insert(
+            stream_id,
+            Multistream {
+                buffer: MultistreamFrameBuffer::new(),
+                state: MultistreamState::OutgoingProtocolWaitingForAccept {
+                    seen_header: false,
+                    current: protocol,
+                    rest: protocols,
+                },
             },
-        });
+        );
         Ok(stream_id)
     }
 
@@ -119,10 +127,10 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// completed (ie if we have not yet seen [`OutputState::OutgoingAccepted`] for the given stream).
     pub fn send_data(&mut self, stream_id: YamuxStreamId, data: &[u8]) -> Result<(), Error> {
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
-            return Err(Error::StreamNotFound(stream_id))
+            return Err(Error::StreamNotFound(stream_id));
         };
         let MultistreamState::Open = &stream.state else {
-            return Err(Error::StreamNotOpen(stream_id))
+            return Err(Error::StreamNotOpen(stream_id));
         };
         self.send_multistream_data(stream_id, data)
     }
@@ -131,10 +139,11 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
     pub fn accept_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
-            return Err(Error::StreamNotFound(stream_id))
+            return Err(Error::StreamNotFound(stream_id));
         };
-        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state else {
-            return Err(Error::StreamNotWaitingForAccept(stream_id))
+        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state
+        else {
+            return Err(Error::StreamNotWaitingForAccept(stream_id));
         };
 
         // TODO: We can move send_multistream* fns to an inner object to avoid needing this clone.
@@ -151,10 +160,11 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
     pub fn reject_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
-            return Err(Error::StreamNotFound(stream_id))
+            return Err(Error::StreamNotFound(stream_id));
         };
-        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state else {
-            return Err(Error::StreamNotWaitingForAccept(stream_id))
+        let MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name) = &stream.state
+        else {
+            return Err(Error::StreamNotWaitingForAccept(stream_id));
         };
 
         // Rejected; wait for another protocol suggestion on this stream and send the reject message.
@@ -191,16 +201,16 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
             let (stream_id, entry) = if let Some(stream_id) = self.read_from_stream_buffer.take() {
                 // We may try to rea from a stream that was closed already due to an invalid
                 // message or something, so ignore and loop if stream isn't found
-                let Some(entry) = self
-                    .bufs
-                    .get_mut(&stream_id) else { continue };
+                let Some(entry) = self.bufs.get_mut(&stream_id) else {
+                    continue;
+                };
 
                 (stream_id, entry)
             } else {
                 let output = match self.inner.next().await {
                     Some(Ok(out)) => out,
                     Some(Err(e)) => return Err(Error::Yamux(e)),
-                    None => return Ok(None)
+                    None => return Ok(None),
                 };
 
                 let stream_id = output.stream_id;
@@ -208,29 +218,39 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     yamux::OutputState::OpenedByRemote => {
                         // New stream opened; add it to our map.
                         tracing::debug!(target: LOG_TARGET, "stream {stream_id} opened by remote");
-                        self.bufs.entry(stream_id).or_insert_with(|| Multistream { 
-                            buffer: MultistreamFrameBuffer::new(), 
-                            state: MultistreamState::NewIncoming 
+                        self.bufs.entry(stream_id).or_insert_with(|| Multistream {
+                            buffer: MultistreamFrameBuffer::new(),
+                            state: MultistreamState::NewIncoming,
                         })
-                    },
+                    }
                     yamux::OutputState::Data(bytes) => {
                         // Data on new stream; buffer the data and ignore if we don't know the stream.
-                        let Some(entry) = self.bufs.get_mut(&stream_id) else { continue };
+                        let Some(entry) = self.bufs.get_mut(&stream_id) else {
+                            continue;
+                        };
                         entry.buffer.feed(bytes);
                         entry
-                    },
+                    }
                     yamux::OutputState::ClosedByRemote => {
                         tracing::debug!(target: LOG_TARGET, "stream {stream_id} closed by remote");
                         // Only emit a `Closed` message if this stream progressed far enough to
                         // actually emit some other message (eg OutputState::IncomingProtocol). If it
                         // didn't get this far then nothing knows about it yet anyway.
-                        if let Some(removed) = self.bufs.remove(&stream_id) 
-                        && !matches!(removed.state, MultistreamState::NewIncoming | MultistreamState::NewIncomingProtocol) {
-                            return Ok(Some(Output { stream_id, state: OutputState::Closed }));
+                        if let Some(removed) = self.bufs.remove(&stream_id)
+                            && !matches!(
+                                removed.state,
+                                MultistreamState::NewIncoming
+                                    | MultistreamState::NewIncomingProtocol
+                            )
+                        {
+                            return Ok(Some(Output {
+                                stream_id,
+                                state: OutputState::Closed,
+                            }));
                         } else {
-                            continue
+                            continue;
                         }
-                    },
+                    }
                 };
 
                 (stream_id, entry)
@@ -245,9 +265,9 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     // from the network.
                     self.read_from_stream_buffer = Some(stream_id);
                     iter
-                },
+                }
                 Some(Err(_)) => return Err(Error::VarintOutOfRange),
-                None => continue 
+                None => continue,
             };
 
             // Handle the message depending on the stream state.
@@ -257,7 +277,10 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
                         tracing::debug!(target: LOG_TARGET, "new incoming stream {stream_id} awaiting protocol suggestion");
                         entry.state = MultistreamState::NewIncomingProtocol;
-                        self.send_multistream_data(stream_id, MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE)?;
+                        self.send_multistream_data(
+                            stream_id,
+                            MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE,
+                        )?;
                     } else {
                         tracing::debug!(target: LOG_TARGET, "new incoming stream {stream_id} invalid protocol suggestion: closing");
                         self.close_stream_immediately(stream_id)?;
@@ -270,7 +293,7 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     if protocol_bytes.pop() != Some(b'\n') {
                         tracing::debug!(target: LOG_TARGET, "invalid multistream protocol (no trailing newline): request to close stream {stream_id}");
                         self.close_stream_immediately(stream_id)?;
-                        continue
+                        continue;
                     }
                     let Ok(protocol_name) = String::from_utf8(protocol_bytes) else {
                         tracing::debug!(target: LOG_TARGET, "invalid multistream protocol (not utf8): request to close stream {stream_id}");
@@ -279,12 +302,14 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     };
 
                     tracing::debug!(target: LOG_TARGET, "incoming protocol {protocol_name} proposed on stream {stream_id}");
-                    entry.state = MultistreamState::NewIncomingProtocolWaitingForAccept(protocol_name.clone());
+                    entry.state = MultistreamState::NewIncomingProtocolWaitingForAccept(
+                        protocol_name.clone(),
+                    );
                     return Ok(Some(Output {
                         stream_id,
-                        state: OutputState::IncomingProtocol(protocol_name)
-                    }))
-                },
+                        state: OutputState::IncomingProtocol(protocol_name),
+                    }));
+                }
                 // We got bytes on the stream, but we're still waiting for the user to
                 // accept it. So, just close the stream immediately and ignore the bytes.
                 MultistreamState::NewIncomingProtocolWaitingForAccept(_) => {
@@ -292,11 +317,15 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                     drop(byte_iter);
                     self.close_stream_immediately(stream_id)?;
                     continue;
-                },
+                }
                 // We initiated an outgoing stream and are waiting for them to accept/reject
                 // the protocol we proposed. They either accepted or they returned "na\n" to
                 // signal rejection
-                MultistreamState::OutgoingProtocolWaitingForAccept { seen_header, current, rest } => {
+                MultistreamState::OutgoingProtocolWaitingForAccept {
+                    seen_header,
+                    current,
+                    rest,
+                } => {
                     if !*seen_header {
                         // expect the multistream header first
                         if bytes_equal_iter(MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE, byte_iter) {
@@ -307,39 +336,43 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                         }
                     } else {
                         // multistream header seen so we are just negotiating the protocol name
-                        let current_with_newline = current.as_bytes().iter().copied().chain(Some(b'\n'));
+                        let current_with_newline =
+                            current.as_bytes().iter().copied().chain(Some(b'\n'));
                         if iters_equal(current_with_newline, byte_iter) {
-                            tracing::debug!(target: LOG_TARGET, "protocol {current} accepted by remote on stream {stream_id}");                            
+                            tracing::debug!(target: LOG_TARGET, "protocol {current} accepted by remote on stream {stream_id}");
                             let current = mem::take(current);
                             entry.state = MultistreamState::Open;
                             return Ok(Some(Output {
                                 stream_id,
                                 state: OutputState::OutgoingAccepted(current),
-                            }))
+                            }));
                         } else {
                             // Try the next protocol, rejecting if no protocols left to try
                             if let Some(next) = rest.pop_front() {
-                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, trying {next}, on stream {stream_id}");                            
+                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, trying {next}, on stream {stream_id}");
                                 *current = next.clone();
-                                self.send_multistream_data_with_newline(stream_id, next.as_bytes())?;
+                                self.send_multistream_data_with_newline(
+                                    stream_id,
+                                    next.as_bytes(),
+                                )?;
                             } else {
-                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, request to close stream {stream_id}");                            
+                                tracing::debug!(target: LOG_TARGET, "protocol {current} rejected by remote, request to close stream {stream_id}");
                                 self.close_stream_immediately(stream_id)?;
                                 return Ok(Some(Output {
                                     stream_id,
                                     state: OutputState::OutgoingRejected,
-                                }))
+                                }));
                             }
                         }
                     }
-                },
+                }
                 // Emit any data received from a stream once multistream negotiations are complete.
                 MultistreamState::Open => {
                     let data: Vec<u8> = byte_iter.collect();
                     return Ok(Some(Output {
                         stream_id,
-                        state: OutputState::Data(data)
-                    }))
+                        state: OutputState::Data(data),
+                    }));
                 }
             }
         }
@@ -348,23 +381,33 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
     /// Send data prefixed with a varint length to follow the multistream protocol.
     /// This does **not** append a newline, which must be given for protocol negotiation messages.
     /// Use [`Self::send_multistream_data_with_newline`] to append a newline.
-    fn send_multistream_data(&mut self, stream_id: YamuxStreamId, data: &[u8]) -> Result<(), Error> {
+    fn send_multistream_data(
+        &mut self,
+        stream_id: YamuxStreamId,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let mut data_len = [0u8; 10];
         let varint_len = varint::encode(data.len() as u64, &mut data_len);
 
-        self.inner.send_data(stream_id, data_len[..varint_len].iter().copied())?;
+        self.inner
+            .send_data(stream_id, data_len[..varint_len].iter().copied())?;
         self.inner.send_data(stream_id, data.iter().copied())?;
         Ok(())
     }
 
     /// Send data prefixed with a varint length and suffixed with a newline to follow the multistream protocol
     /// when sending the basic negotiation + multistream protocol strings.
-    fn send_multistream_data_with_newline(&mut self, stream_id: YamuxStreamId, data: &[u8]) -> Result<(), Error> {
+    fn send_multistream_data_with_newline(
+        &mut self,
+        stream_id: YamuxStreamId,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let mut data_len = [0u8; 10];
         // Add 1 for the newline we'll append.
         let varint_len = varint::encode(data.len() as u64 + 1, &mut data_len);
 
-        self.inner.send_data(stream_id, data_len[..varint_len].iter().copied())?;
+        self.inner
+            .send_data(stream_id, data_len[..varint_len].iter().copied())?;
         self.inner.send_data(stream_id, data.iter().copied())?;
         self.inner.send_data(stream_id, b"\n".iter().copied())?;
         Ok(())
@@ -372,31 +415,27 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
 }
 
 /// Do two iterators have identical contents?
-fn iters_equal(mut a: impl Iterator<Item=u8>, mut b: impl Iterator<Item=u8>) -> bool {
+fn iters_equal(mut a: impl Iterator<Item = u8>, mut b: impl Iterator<Item = u8>) -> bool {
     loop {
         match (a.next(), b.next()) {
             // False if items don't match.
             (Some(a1), Some(b1)) => {
                 if a1 != b1 {
-                    return false
+                    return false;
                 }
-            },
-            // True if we get to the end of both together.
-            (None, None) => {
-                return true
-            },
-            // False otherwise (1 iter has remaining items and other does not).
-            _ => {
-                return false
             }
+            // True if we get to the end of both together.
+            (None, None) => return true,
+            // False otherwise (1 iter has remaining items and other does not).
+            _ => return false,
         }
     }
 }
 
 /// Does some iterator of bytes equal the given slice?
-fn bytes_equal_iter(value: &[u8], iter: impl ExactSizeIterator<Item=u8>) -> bool {
+fn bytes_equal_iter(value: &[u8], iter: impl ExactSizeIterator<Item = u8>) -> bool {
     if value.len() != iter.len() {
-        return false
+        return false;
     }
     iters_equal(value.iter().copied(), iter)
 }
@@ -404,10 +443,10 @@ fn bytes_equal_iter(value: &[u8], iter: impl ExactSizeIterator<Item=u8>) -> bool
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::layers::yamux::header::{FrameType, YamuxHeader};
+    use crate::utils::testing::{MockStream, MockStreamHandle, block_on};
     use alloc::vec;
-    use crate::utils::testing::{block_on, MockStream, MockStreamHandle};
-    use crate::layers::yamux::header::{ FrameType, YamuxHeader };
-    
+
     fn yamux_multistream() -> (YamuxMultistream<MockStream>, MockStreamHandle) {
         let stream = MockStream::new();
         let handle = stream.handle();
@@ -445,11 +484,12 @@ mod test {
         YamuxHeader::decode(&handle.drain(YamuxHeader::SIZE).try_into().unwrap()).unwrap()
     }
 
-    fn next_multistream_frames(handle: &mut MockStreamHandle) -> impl Iterator<Item=Vec<u8>> {
-        let header = YamuxHeader::decode(&handle.drain(YamuxHeader::SIZE).try_into().unwrap()).unwrap();
+    fn next_multistream_frames(handle: &mut MockStreamHandle) -> impl Iterator<Item = Vec<u8>> {
+        let header =
+            YamuxHeader::decode(&handle.drain(YamuxHeader::SIZE).try_into().unwrap()).unwrap();
         if header.frame_type != FrameType::Data {
             // Skip over non-data frames.
-            return next_multistream_frames(handle)
+            return next_multistream_frames(handle);
         }
 
         // Maybe multiple multistream frames in one yamux frame, so return
@@ -458,20 +498,20 @@ mod test {
         core::iter::from_fn(move || {
             // Nothing left to iterate.
             if data.is_empty() {
-                return None
+                return None;
             }
 
             // Decode multistream frame length
             let data_cursor = &mut &*data;
             let multistream_len = match varint::decode(data_cursor) {
                 Ok(len) => len as usize,
-                Err(e) => panic!("Could not decode mulitstream varint: {e}. Data: {data:?}")
+                Err(e) => panic!("Could not decode mulitstream varint: {e}. Data: {data:?}"),
             };
-    
+
             // Take this frame and keep the rest
             let output = data_cursor[..multistream_len].to_vec();
             data = data_cursor[multistream_len..].to_vec();
-            
+
             Some(output)
         })
     }
@@ -485,9 +525,9 @@ mod test {
         open_stream(&mut handle, 2);
         send_data(&mut handle, 2, &[b"/multistream/1.0.0\n", b"/foo/bar\n"]);
         assert_eq!(
-            next_expecting_output(&mut stream), 
-            Output { 
-                stream_id: YamuxStreamId::new(2), 
+            next_expecting_output(&mut stream),
+            Output {
+                stream_id: YamuxStreamId::new(2),
                 state: OutputState::IncomingProtocol("/foo/bar".into())
             }
         );
@@ -500,10 +540,7 @@ mod test {
         let frames: Vec<_> = next_multistream_frames(&mut handle).collect();
         assert_eq!(
             frames,
-            vec![
-                b"/multistream/1.0.0\n".to_vec(), 
-                b"/foo/bar\n".to_vec(),
-            ]
+            vec![b"/multistream/1.0.0\n".to_vec(), b"/foo/bar\n".to_vec(),]
         );
 
         // The remote now can send some data.
@@ -511,16 +548,16 @@ mod test {
 
         // We should now receive it unchanged.
         assert_eq!(
-            next_expecting_output(&mut stream), 
-            Output { 
-                stream_id: YamuxStreamId::new(2), 
+            next_expecting_output(&mut stream),
+            Output {
+                stream_id: YamuxStreamId::new(2),
                 state: OutputState::Data(b"hello world".to_vec())
             }
         );
         assert_eq!(
-            next_expecting_output(&mut stream), 
-            Output { 
-                stream_id: YamuxStreamId::new(2), 
+            next_expecting_output(&mut stream),
+            Output {
+                stream_id: YamuxStreamId::new(2),
                 state: OutputState::Data(b"and more".to_vec())
             }
         );
@@ -535,9 +572,9 @@ mod test {
         open_stream(&mut handle, 2);
         send_data(&mut handle, 2, &[b"/multistream/1.0.0\n", b"/foo/bar\n"]);
         assert_eq!(
-            next_expecting_output(&mut stream), 
-            Output { 
-                stream_id: YamuxStreamId::new(2), 
+            next_expecting_output(&mut stream),
+            Output {
+                stream_id: YamuxStreamId::new(2),
                 state: OutputState::IncomingProtocol("/foo/bar".into())
             }
         );
@@ -550,18 +587,15 @@ mod test {
         let frames: Vec<_> = next_multistream_frames(&mut handle).collect();
         assert_eq!(
             frames,
-            vec![
-                b"/multistream/1.0.0\n".to_vec(), 
-                b"na\n".to_vec(),
-            ]
+            vec![b"/multistream/1.0.0\n".to_vec(), b"na\n".to_vec(),]
         );
 
         // The remote can propose a new protocol
         send_data(&mut handle, 2, &[b"/foo/wibble\n"]);
         assert_eq!(
-            next_expecting_output(&mut stream), 
-            Output { 
-                stream_id: YamuxStreamId::new(2), 
+            next_expecting_output(&mut stream),
+            Output {
+                stream_id: YamuxStreamId::new(2),
                 state: OutputState::IncomingProtocol("/foo/wibble".into())
             }
         );
@@ -572,10 +606,7 @@ mod test {
 
         // Now the remote should receive an accept message.
         let frames: Vec<_> = next_multistream_frames(&mut handle).collect();
-        assert_eq!(
-            frames,
-            vec![b"/foo/wibble\n".to_vec()]
-        );
+        assert_eq!(frames, vec![b"/foo/wibble\n".to_vec()]);
     }
 
     #[test]
@@ -627,7 +658,8 @@ mod test {
 
         // Now, chunk and send this as many yamux frames
         for bytes in data.chunks(10 * 1024) {
-            handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), bytes.len() as u32).encode());
+            handle
+                .extend(YamuxHeader::send_data(YamuxStreamId::new(2), bytes.len() as u32).encode());
             handle.extend(bytes.iter().copied());
         }
 
@@ -656,7 +688,9 @@ mod test {
 
         // Send 10MB of data to the remote.
         let ten_mb = 10 * 1024 * 1024usize;
-        stream.send_data(YamuxStreamId::new(2), &vec![123u8; ten_mb]).unwrap();
+        stream
+            .send_data(YamuxStreamId::new(2), &vec![123u8; ten_mb])
+            .unwrap();
         block_on(stream.next());
 
         // Queue a bunch of window updates to be applied as they are needed. Each adds just 10kb
@@ -672,8 +706,16 @@ mod test {
         while response.len() < ten_mb {
             let header = next_yamux_header(&mut handle);
 
-            assert_eq!(header.frame_type, FrameType::Data, "frame {frame_count} should be a Data frame");
-            assert_eq!(header.stream_id, YamuxStreamId::new(2), "frame {frame_count} should be on stream 2");
+            assert_eq!(
+                header.frame_type,
+                FrameType::Data,
+                "frame {frame_count} should be a Data frame"
+            );
+            assert_eq!(
+                header.stream_id,
+                YamuxStreamId::new(2),
+                "frame {frame_count} should be on stream 2"
+            );
 
             let data_segment = handle.drain(header.length as usize);
             response.extend_from_slice(&data_segment);

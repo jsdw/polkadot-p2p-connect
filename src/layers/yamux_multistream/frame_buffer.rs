@@ -1,8 +1,8 @@
-use alloc::collections::VecDeque;
 use crate::utils::varint;
+use alloc::collections::VecDeque;
 
 /// A state machine which processes the bytes for a single mulistream,
-/// taking in bytes as they are available and handing back frames as 
+/// taking in bytes as they are available and handing back frames as
 /// they become ready.
 #[derive(Debug, Clone, Default)]
 pub struct MultistreamFrameBuffer {
@@ -46,34 +46,34 @@ impl MultistreamFrameBuffer {
     }
 
     /// Advance the state of the internal buffer, handing back messages once they are available.
-    pub fn next(&mut self) -> Option<Result<impl ExactSizeIterator<Item=u8>, Error>> {
+    pub fn next(&mut self) -> Option<Result<impl ExactSizeIterator<Item = u8>, Error>> {
         if self.failed {
-            return Some(Err(Error))
+            return Some(Err(Error));
         }
 
         loop {
             match self.needs {
-                // We're still decoding the length bytes. Try and decode another 
+                // We're still decoding the length bytes. Try and decode another
                 // byte from the input.
                 MultistreamFrameBufferNeeds::DecodingLen(decoder) => {
                     let Some(byte) = self.buf.pop_front() else {
-                        return None
+                        return None;
                     };
                     match decoder.feed(byte) {
                         varint::DecoderOutput::Value(len) => {
                             self.needs = MultistreamFrameBufferNeeds::Len(len as usize);
                             // Loop around again to see if we can return bytes already.
-                        },
+                        }
                         varint::DecoderOutput::NeedsMoreBytes(d) => {
                             self.needs = MultistreamFrameBufferNeeds::DecodingLen(d);
                             // Loop around again to see if we can buffer more bytes.
-                        },
+                        }
                         varint::DecoderOutput::OutOfRange => {
                             self.failed = true;
-                            return Some(Err(Error))
+                            return Some(Err(Error));
                         }
                     }
-                },
+                }
                 // We've decoded length; just waiting for enough buffer bytes
                 // and then we'll hand an iterator to them back, clearing them
                 // from our internal buf.
@@ -81,9 +81,9 @@ impl MultistreamFrameBuffer {
                     if self.buf.len() >= len {
                         let iter = self.buf.drain(0..len);
                         self.needs = MultistreamFrameBufferNeeds::default();
-                        return Some(Ok(iter))
+                        return Some(Ok(iter));
                     } else {
-                        return None
+                        return None;
                     }
                 }
             }
@@ -94,8 +94,8 @@ impl MultistreamFrameBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use alloc::{vec, vec::Vec};
     use crate::utils::varint;
+    use alloc::{vec, vec::Vec};
 
     /// Helper: encode a payload as a multistream frame (varint length ++ payload).
     fn make_frame(payload: &[u8]) -> Vec<u8> {
@@ -112,17 +112,17 @@ mod test {
 
     #[test]
     fn decodes_frames() {
-        let inputs = [
-            "",
-            "h",
-            "hello",
-        ];
+        let inputs = ["", "h", "hello"];
 
         for input in inputs {
             let mut buf = MultistreamFrameBuffer::new();
             buf.feed(&make_frame(input.as_bytes()));
             let output = collect_next(&mut buf).unwrap().unwrap();
-            assert_eq!(input.as_bytes(), output, "output does not match input '{input}'");
+            assert_eq!(
+                input.as_bytes(),
+                output,
+                "output does not match input '{input}'"
+            );
         }
     }
 

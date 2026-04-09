@@ -1,7 +1,7 @@
+use crate::utils::protobuf;
+use crate::utils::varint;
 use alloc::string::String;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use crate::utils::varint;
-use crate::utils::protobuf;
 
 // ---------------------------------------------------------------------------
 // Identity (our public + private keypair)
@@ -16,7 +16,7 @@ impl Identity {
     /// Instantiate a new identity. the bytes given should be randomly generated.
     pub fn from_random_bytes(bytes: [u8; 32]) -> Self {
         Self {
-            signing_key: SigningKey::from_bytes(&bytes)
+            signing_key: SigningKey::from_bytes(&bytes),
         }
     }
 
@@ -72,7 +72,7 @@ pub struct PeerId {
 
 impl PeerId {
     // Take an ed25519 public key and convert it to a PeerId.
-    pub (crate) fn from_ed25519_public_key(key: [u8; 32]) -> Self {
+    pub(crate) fn from_ed25519_public_key(key: [u8; 32]) -> Self {
         let mut buf = [0u8; PEER_ID_LEN];
 
         // 0x00 is an Identity type (for ed25519 keys).
@@ -98,7 +98,10 @@ impl PeerId {
             .map_err(PeerIdFromBase58Error::Base58)?;
 
         if num_bytes_decoded != PEER_ID_LEN {
-            return Err(PeerIdFromBase58Error::WrongLength { expected: PEER_ID_LEN, actual: num_bytes_decoded })
+            return Err(PeerIdFromBase58Error::WrongLength {
+                expected: PEER_ID_LEN,
+                actual: num_bytes_decoded,
+            });
         }
 
         // Validate multihash structure (see encoding above).
@@ -112,9 +115,13 @@ impl PeerId {
             }
 
             // Length of the remaining bytes must be 36.
-            let digest_len = varint::decode(cursor).map_err(PeerIdFromBase58Error::CannotDecodeVarint)?;
+            let digest_len =
+                varint::decode(cursor).map_err(PeerIdFromBase58Error::CannotDecodeVarint)?;
             if cursor.len() != 36 && digest_len != 36 {
-                return Err(PeerIdFromBase58Error::WrongLength { expected: 36, actual: cursor.len() })
+                return Err(PeerIdFromBase58Error::WrongLength {
+                    expected: 36,
+                    actual: cursor.len(),
+                });
             }
         }
 
@@ -190,7 +197,11 @@ mod test {
                 }
             };
 
-            assert_eq!(decoded_id.to_base58(), id, "Round-trip decode/encode PeerId does not result in the same output");
+            assert_eq!(
+                decoded_id.to_base58(),
+                id,
+                "Round-trip decode/encode PeerId does not result in the same output"
+            );
         }
     }
 
@@ -220,7 +231,11 @@ mod test {
         let message = b"hello world";
         let signature = identity.sign(message);
 
-        assert!(!verify_ed25519(&other.public_key_bytes(), message, &signature));
+        assert!(!verify_ed25519(
+            &other.public_key_bytes(),
+            message,
+            &signature
+        ));
     }
 
     #[test]
@@ -230,6 +245,10 @@ mod test {
         let mut signature = identity.sign(message);
         signature[0] ^= 0xff;
 
-        assert!(!verify_ed25519(&identity.public_key_bytes(), message, &signature));
+        assert!(!verify_ed25519(
+            &identity.public_key_bytes(),
+            message,
+            &signature
+        ));
     }
 }

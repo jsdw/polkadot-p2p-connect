@@ -13,9 +13,9 @@ pub enum Error {
 
 /// Encode a u64 as an unsigned varint, returning the number of bytes written.
 /// Prefer [`encode_to_vec`] where possible as this cannot hit out-of-bound issues.
-/// 
+///
 /// # Panics
-/// 
+///
 /// Panics if the buffer given to encode it to is not large enough.
 pub fn encode(mut value: u64, out: &mut [u8]) -> usize {
     let mut idx = 0;
@@ -62,7 +62,7 @@ pub fn decode(bytes: &mut &[u8]) -> Result<u64, Error> {
         match decoder.feed(byte) {
             DecoderOutput::Value(val) => return Ok(val),
             DecoderOutput::NeedsMoreBytes(d) => decoder = d,
-            DecoderOutput::OutOfRange => return Err(Error::OutOfRange)
+            DecoderOutput::OutOfRange => return Err(Error::OutOfRange),
         }
     }
     Err(Error::UnexpectedEndOfInput)
@@ -80,7 +80,7 @@ pub async fn decode_from_stream(stream: &mut impl AsyncStream) -> Result<u64, Er
         match decoder.feed(byte[0]) {
             DecoderOutput::Value(val) => return Ok(val),
             DecoderOutput::NeedsMoreBytes(d) => decoder = d,
-            DecoderOutput::OutOfRange => return Err(Error::OutOfRange)
+            DecoderOutput::OutOfRange => return Err(Error::OutOfRange),
         }
     }
 }
@@ -115,11 +115,11 @@ impl Decoder {
             // Too many bytes given.
             return DecoderOutput::OutOfRange;
         }
-        
+
         // Push the given byte to our buf.
         self.buf[self.len] = byte;
         self.len += 1;
-        
+
         if byte & 0b1000_0000 == 0 {
             // MSB not set: this is the last byte; decode!
             DecoderOutput::Value(self.decode_valid_bytes())
@@ -130,7 +130,7 @@ impl Decoder {
     }
 
     fn decode_valid_bytes(self) -> u64 {
-        let mut value: u64 = 0;        
+        let mut value: u64 = 0;
         for (idx, &byte) in self.buf[..self.len].iter().enumerate() {
             let byte_val = (byte & 0b0111_1111) as u64;
             value |= byte_val << (idx * 7)
@@ -153,7 +153,10 @@ mod test {
         (255, &[0xFF, 0x01]),
         (300, &[0xAC, 0x02]),
         (16384, &[0x80, 0x80, 0x01]),
-        (u64::MAX, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]),
+        (
+            u64::MAX,
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+        ),
     ];
 
     #[test]

@@ -63,7 +63,7 @@ impl YamuxHeader {
             length: 0,
         }
     }
-    
+
     /// Respond to a ping.
     pub fn pong(stream_id: YamuxStreamId, data: u32) -> Self {
         YamuxHeader {
@@ -99,11 +99,11 @@ impl YamuxHeader {
     pub fn decode(buf: &[u8; YAMUX_FRAME_HEADER_SIZE]) -> Result<Self, YamuxHeaderDecodeError> {
         let version = buf[0];
         if version != YAMUX_VERSION {
-            return Err(YamuxHeaderDecodeError::InvalidVersion(version))
+            return Err(YamuxHeaderDecodeError::InvalidVersion(version));
         }
 
-        let frame_type = FrameType::from_u8(buf[1])
-            .ok_or(YamuxHeaderDecodeError::InvalidFrameType(buf[1]))?;
+        let frame_type =
+            FrameType::from_u8(buf[1]).ok_or(YamuxHeaderDecodeError::InvalidFrameType(buf[1]))?;
 
         let flags = FrameFlags(u16::from_be_bytes([buf[2], buf[3]]));
         let stream_id = YamuxStreamId(u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]));
@@ -125,7 +125,7 @@ pub enum YamuxHeaderDecodeError {
     #[error("invalud yamux version; expected 0 but got {0}")]
     InvalidVersion(u8),
     #[error("invalud yamux frame type; got {0}")]
-    InvalidFrameType(u8)
+    InvalidFrameType(u8),
 }
 
 /// Opaque yamux stream ID
@@ -217,13 +217,13 @@ impl FrameFlags {
     }
     pub fn is_open_new_stream(&self) -> bool {
         self.contains(FrameFlag::Syn)
-        && !self.contains(FrameFlag::Rst)
-        && !self.contains(FrameFlag::Fin)
+            && !self.contains(FrameFlag::Rst)
+            && !self.contains(FrameFlag::Fin)
     }
     pub fn contains(&self, flag: FrameFlag) -> bool {
         self.0 & (flag as u16) == (flag as u16)
     }
-    fn iter(&self) -> impl Iterator<Item=FrameFlag> {
+    fn iter(&self) -> impl Iterator<Item = FrameFlag> {
         let syn = self.contains(FrameFlag::Syn).then(|| FrameFlag::Syn);
         let ack = self.contains(FrameFlag::Ack).then(|| FrameFlag::Ack);
         let fin = self.contains(FrameFlag::Fin).then(|| FrameFlag::Fin);

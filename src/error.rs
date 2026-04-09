@@ -1,9 +1,5 @@
 use super::SubscriptionId;
-use crate::layers::{
-    multistream,
-    noise,
-    yamux_multistream,
-};
+use crate::layers::{multistream, noise, yamux_multistream};
 
 /// An error that can occur establishing a connection with some peer.
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +39,7 @@ enum ProtocolErrorKind {
     #[error("error establish noise encrypted stream: {0}")]
     Noise(noise::Error),
     #[error("yamux multistream error: {0}")]
-    YamuxMultistream(yamux_multistream::Error)
+    YamuxMultistream(yamux_multistream::Error),
 }
 
 // Impls to make converitng between internal errors and our opaque ProtocolError variants easy:
