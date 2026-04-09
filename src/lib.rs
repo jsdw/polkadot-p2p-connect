@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod layers;
 mod utils;
 mod error;
 
@@ -14,9 +15,9 @@ use alloc::collections::{BTreeMap, vec_deque::VecDeque};
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::boxed::Box;
-use utils::{
+use utils::peer_id;
+use layers::{
     multistream,
-    peer_id,
     noise,
     yamux,
     yamux_multistream::{self, YamuxStreamId},

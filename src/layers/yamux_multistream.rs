@@ -2,7 +2,7 @@ mod frame_buffer;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::utils::yamux::{self, YamuxSession};
+use crate::layers::yamux::{self, YamuxSession};
 use crate::utils::{async_stream, varint};
 use alloc::collections::{BTreeMap, VecDeque};
 use core::mem;
@@ -202,12 +202,15 @@ impl <S: async_stream::AsyncStream> YamuxMultistream<S> {
                 let stream_id = output.stream_id;
                 let entry = match output.state {
                     yamux::OutputState::OpenedByRemote => {
+                        // New stream opened; add it to our map.
+                        tracing::debug!(target: LOG_TARGET, "stream {stream_id} opened by remote");
                         self.bufs.entry(stream_id).or_insert_with(|| Multistream { 
                             buffer: MultistreamFrameBuffer::new(), 
                             state: MultistreamState::NewIncoming 
                         })
                     },
                     yamux::OutputState::Data(bytes) => {
+                        // Data on new stream; buffer the data and ignore if we don't know the stream.
                         let Some(entry) = self.bufs.get_mut(&stream_id) else { continue };
                         entry.buffer.feed(bytes);
                         entry
@@ -392,4 +395,11 @@ fn bytes_equal_iter(value: &[u8], iter: impl ExactSizeIterator<Item=u8>) -> bool
         return false
     }
     iters_equal(value.iter().copied(), iter)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    
 }

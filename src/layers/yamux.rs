@@ -515,33 +515,11 @@ mod test {
     use super::*;
     use crate::{
         AsyncStream, 
+        layers::yamux::header::FrameFlags,
         utils::{
-            mock_stream::{MockStream, MockStreamHandle}, 
-            yamux::header::FrameFlags
+            testing::{block_on, MockStream, MockStreamHandle},
         }
     };
-
-    /// Poll some async task, returning Some(result) if Poll::Ready
-    /// and None if Poll::Pending.
-    fn block_on<F: core::future::Future>(f: F) -> Option<F::Output> {
-        use core::task::{Context, Poll, Waker};
-        use alloc::task::Wake;
-        use alloc::sync::Arc;
-        use core::pin::pin;
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut cx = Context::from_waker(&waker);
-        let mut f = pin!(f);
-        match f.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => Some(v),
-            Poll::Pending => None,
-        }
-    }
 
     /// Poll the [`YamuxSession`], expecting it to return an [`Output`].
     fn next_expecting_output<S: AsyncStream>(yamux: &mut YamuxSession<S>) -> Output<'_> {

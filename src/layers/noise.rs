@@ -377,28 +377,10 @@ impl snow::resolvers::CryptoResolver for CryptoResolver {
 mod test {
     use super::*;
     use alloc::vec;
-    use crate::utils::mock_stream::MockStream;
+    use crate::utils::testing::{block_on as block_on_inner, MockStream};
 
-    /// Poll some async task, expecting it to return a result.
-    /// Panics if the task returns Pending.
     fn block_on<F: core::future::Future>(f: F) -> F::Output {
-        use core::task::{Context, Poll, Waker};
-        use alloc::task::Wake;
-        use alloc::sync::Arc;
-        use core::pin::pin;
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut cx = Context::from_waker(&waker);
-        let mut f = pin!(f);
-        match f.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => v,
-            Poll::Pending => panic!("future returned Pending in mock-I/O test"),
-        }
+        block_on_inner(f).expect("future returned Pending in mock-I/O test")
     }
 
     /// Simple test RNG: fills bytes from an atomic counter.
