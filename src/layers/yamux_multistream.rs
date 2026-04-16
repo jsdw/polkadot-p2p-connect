@@ -15,6 +15,7 @@ pub use yamux::Error as YamuxError;
 pub use yamux::YamuxStreamId;
 
 const MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE: &[u8] = b"/multistream/1.0.0\n";
+const MULTISTREAM_PROTOCOL_MAX_LEN: usize = 1024;
 
 pub struct YamuxMultistream<S> {
     inner: YamuxSession<S>,
@@ -40,13 +41,25 @@ pub enum OutputState {
     // which one was accepted.
     OutgoingAccepted(#[allow(dead_code)] String),
     Data(Vec<u8>),
-    Closed,
+    Closed(CloseReason),
+}
+
+/// Why was the channel closed?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseReason {
+    ClosedByRemote,
+    IncomingMessageTooLarge
 }
 
 #[derive(Debug)]
 struct Multistream {
     buffer: MultistreamFrameBuffer,
     state: MultistreamState,
+    /// The maximum size allowed for incoming messages.
+    /// 
+    /// When the buffer would be grown beyond this size, stop
+    /// pushing data to it close this stream.
+    max_buffer_size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +109,7 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
     pub fn open_stream<P: Into<String>>(
         &mut self,
         protocols: impl IntoIterator<Item = P>,
+        max_buffer_size: usize,
     ) -> Result<YamuxStreamId, Error> {
         let mut protocols: VecDeque<String> = protocols.into_iter().map(|p| p.into()).collect();
         let stream_id = self.inner.open_stream();
@@ -113,6 +127,7 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
             stream_id,
             Multistream {
                 buffer: MultistreamFrameBuffer::new(),
+                max_buffer_size,
                 state: MultistreamState::OutgoingProtocolWaitingForAccept {
                     seen_header: false,
                     current: protocol,
@@ -137,7 +152,7 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
 
     /// Accept a stream for which [`OutputState::IncomingProtocol`] was emitted.
     /// Errors if we call this for a stream that is not waiting to be accepted / rejected.
-    pub fn accept_protocol(&mut self, stream_id: YamuxStreamId) -> Result<(), Error> {
+    pub fn accept_protocol(&mut self, stream_id: YamuxStreamId, max_buffer_size: usize) -> Result<(), Error> {
         let Some(stream) = self.bufs.get_mut(&stream_id) else {
             return Err(Error::StreamNotFound(stream_id));
         };
@@ -152,6 +167,8 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
         // Accepted; now we are "open" on this incoming stream
         tracing::debug!(target: LOG_TARGET, "protocol {protocol_name} accepted on stream {stream_id}");
         stream.state = MultistreamState::Open;
+        // Set the buffer size (it'll be super small initially until protocol is accepted):
+        stream.max_buffer_size = max_buffer_size;
         self.send_multistream_data_with_newline(stream_id, protocol_name.as_bytes())?;
         Ok(())
     }
@@ -221,6 +238,9 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
                         self.bufs.entry(stream_id).or_insert_with(|| Multistream {
                             buffer: MultistreamFrameBuffer::new(),
                             state: MultistreamState::NewIncoming,
+                            // Only allow enough for protocol negotiation initially.
+                            // This is "upgraded" when the user accepts a protocol.
+                            max_buffer_size: MULTISTREAM_PROTOCOL_MAX_LEN,
                         })
                     }
                     yamux::OutputState::Data(bytes) => {
@@ -228,6 +248,14 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
                         let Some(entry) = self.bufs.get_mut(&stream_id) else {
                             continue;
                         };
+                        // Close if buffer length exceeded.
+                        if entry.buffer.len() + bytes.len() > entry.max_buffer_size {
+                            self.close_stream_immediately(stream_id)?;
+                            return Ok(Some(Output {
+                                stream_id,
+                                state: OutputState::Closed(CloseReason::IncomingMessageTooLarge),
+                            }))
+                        }
                         entry.buffer.feed(bytes);
                         entry
                     }
@@ -245,7 +273,7 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
                         {
                             return Ok(Some(Output {
                                 stream_id,
-                                state: OutputState::Closed,
+                                state: OutputState::Closed(CloseReason::ClosedByRemote),
                             }));
                         } else {
                             continue;
@@ -442,6 +470,8 @@ fn bytes_equal_iter(value: &[u8], iter: impl ExactSizeIterator<Item = u8>) -> bo
 
 #[cfg(test)]
 mod test {
+    use core::usize;
+
     use super::*;
     use crate::layers::yamux::header::{FrameType, YamuxHeader};
     use crate::utils::testing::{MockStream, MockStreamHandle, block_on};
@@ -533,7 +563,7 @@ mod test {
         );
 
         // We accept!
-        stream.accept_protocol(YamuxStreamId::new(2)).unwrap();
+        stream.accept_protocol(YamuxStreamId::new(2), usize::MAX).unwrap();
         block_on(stream.next());
 
         // Now the remote should receive an accept message.
@@ -601,7 +631,7 @@ mod test {
         );
 
         // We can then accept it
-        stream.accept_protocol(YamuxStreamId::new(2)).unwrap();
+        stream.accept_protocol(YamuxStreamId::new(2), usize::MAX).unwrap();
         block_on(stream.next());
 
         // Now the remote should receive an accept message.
@@ -636,6 +666,28 @@ mod test {
     }
 
     #[test]
+    fn max_buffer_len_is_honoured_for_protocol_agreeing() {
+        //tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG).init();
+        let (mut stream, mut handle) = yamux_multistream();
+
+        // Add up the bytes so that we are just 1 byte over the 1024 byte buffer length when
+        // combining all of our messages.
+        let long_name: Vec<u8> = core::iter::repeat_n(b'a', 1002)
+            .chain(Some(b'\n'))
+            .collect();
+
+        // Try to do initial protocol negotiating with a too-long protocol name:
+        open_stream(&mut handle, 2);
+        send_data(&mut handle, 2, &[b"/multistream/1.0.0\n", &long_name]);
+        let output = next_expecting_output(&mut stream);
+
+        assert_eq!(output, Output { 
+            stream_id: YamuxStreamId::new(2),
+            state: OutputState::Closed(CloseReason::IncomingMessageTooLarge)
+        });
+    }
+
+    #[test]
     fn accepts_large_payloads_split_across_yamux_frames() {
         //tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG).init();
         let (mut stream, mut handle) = yamux_multistream();
@@ -643,8 +695,8 @@ mod test {
         // Open and accept a stream first. This all tested so keep it brief.
         open_stream(&mut handle, 2);
         send_data(&mut handle, 2, &[b"/multistream/1.0.0\n", b"/foo/bar\n"]);
-        next_expecting_output(&mut stream); // IncomintProtocol
-        stream.accept_protocol(YamuxStreamId::new(2)).unwrap();
+        next_expecting_output(&mut stream); // IncomingProtocol
+        stream.accept_protocol(YamuxStreamId::new(2), usize::MAX).unwrap();
         block_on(stream.next()); // Drive things forward after accept
         let _ = next_multistream_frames(&mut handle); // Pull accept frames.
 
@@ -681,8 +733,8 @@ mod test {
         // Open and accept a stream first. This all tested so keep it brief.
         open_stream(&mut handle, 2);
         send_data(&mut handle, 2, &[b"/multistream/1.0.0\n", b"/foo/bar\n"]);
-        next_expecting_output(&mut stream); // IncomintProtocol
-        stream.accept_protocol(YamuxStreamId::new(2)).unwrap();
+        next_expecting_output(&mut stream); // IncomingProtocol
+        stream.accept_protocol(YamuxStreamId::new(2), usize::MAX).unwrap();
         block_on(stream.next()); // Drive things forward after accept
         let _ = next_multistream_frames(&mut handle); // Pull accept frames.
 

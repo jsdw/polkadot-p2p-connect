@@ -40,6 +40,11 @@ impl MultistreamFrameBuffer {
         }
     }
 
+    /// Number of bytes currently stored in the internal buffer.
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Hand some bytes to this buffer.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.buf.extend(bytes);

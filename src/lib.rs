@@ -25,7 +25,6 @@ use layers::{
 use utils::peer_id;
 use alloc::sync::Arc;
 use utils::opaque_id::OpaqueId;
-use utils::sync_or_async_fn::SyncOrAyncFn;
 
 /*
 
@@ -129,6 +128,7 @@ match peer.next().await? {
 
 // Re-export anything that is part of the public APIs.
 pub use crate::error::{ConnectionError, ProtocolError, StreamError};
+use crate::layers::yamux_multistream::CloseReason;
 pub use crate::utils::async_stream::{AsyncStream, Error as AsyncStreamError};
 pub use crate::utils::peer_id::PeerId;
 
@@ -168,7 +168,7 @@ pub trait Protocol {
 
 #[derive(Debug, Clone)]
 enum AnyProtocol {
-    RequestResponse(RequestResponseProtocol),
+    RequestResponse(RequestProtocol),
     Subscription(SubscriptionProtocol),
 }
 
@@ -176,14 +176,14 @@ enum AnyProtocol {
 /// entail one side making a single request containing some payload, and the other
 /// side returning a single response on the same substream.
 #[derive(Debug, Clone)]
-pub struct RequestResponseProtocol {
+pub struct RequestProtocol {
     name: String,
     allow_inbound: bool,
     timeout: Duration,
     max_response_size_in_bytes: usize,
 }
 
-impl RequestResponseProtocol {
+impl RequestProtocol {
     /// Create a new [`RequestResponseProtocol`], providing the 
     /// multistream protocol name that it will match on.
     pub fn new(name: impl Into<String>) -> Self {
@@ -203,6 +203,12 @@ impl RequestResponseProtocol {
         self
     }
 
+    /// Set the maximum size of incoming messages for this protocol, in bytes.
+    pub fn with_max_response_size(mut self, max_response_size_in_bytes: usize) -> Self {
+        self.max_response_size_in_bytes = max_response_size_in_bytes;
+        self
+    }
+
     /// Configure the request timeout. If outgoing requests take more than this
     /// amount of time to receive a response then an error will be returned instead.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -211,49 +217,18 @@ impl RequestResponseProtocol {
     }
 }
 
-// manual debug impl, but ensures that we'll get an error if we add a field,
-// and otherwise leans on fmt as much as possible.
-impl core::fmt::Debug for RequestResponseProtocol {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        #[derive(Debug)]
-        #[allow(unused)]
-        struct RequestResponseProtocol<'a> {
-            name: &'a String,
-            allow_inbound: &'a bool,
-            timeout: &'a Duration,
-            max_response_size_in_bytes: &'a usize,
-            response: Option<&'static str>
-        }
-
-        let Self {
-            name,
-            allow_inbound,
-            timeout,
-            max_response_size_in_bytes,
-        } = self;
-
-        RequestResponseProtocol { 
-            name, 
-            allow_inbound, 
-            timeout,
-            max_response_size_in_bytes,
-            response: response.as_ref().map(|_| "<function>")
-        }.fmt(f)
-    }
-}
-
 /// The ID for a single [`RequestResponseProtocol`].
-pub struct RequestResponseProtocolId(usize);
+pub struct RequestProtocolId(usize);
 
-impl From<OpaqueId> for RequestResponseProtocolId {
+impl From<OpaqueId> for RequestProtocolId {
     fn from(value: OpaqueId) -> Self {
-        RequestResponseProtocolId(value.get())
+        RequestProtocolId(value.get())
     }
 }
 
 #[allow(private_interfaces)]
-impl Protocol for RequestResponseProtocol {
-    type Id = RequestResponseProtocolId;
+impl Protocol for RequestProtocol {
+    type Id = RequestProtocolId;
     fn into_any_protocol(self) -> AnyProtocol {
         AnyProtocol::RequestResponse(self)
     }
@@ -263,44 +238,38 @@ impl Protocol for RequestResponseProtocol {
 /// entail one side making a single request containing an initial handshake,
 /// and then validating a handshake from the other side, and then receiving
 /// a stream of notifications back.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SubscriptionProtocol {
     name: String,
     allow_inbound: bool,
     max_response_size_in_bytes: usize,
     our_handshake: Vec<u8>,
-    handshake_verification: Option<Arc<dyn Fn(Vec<u8>) -> bool>>,
 }
 
-// manual debug impl, but ensures that we'll get an error if we add a field,
-// and otherwise leans on fmt as much as possible.
-impl core::fmt::Debug for SubscriptionProtocol {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        #[derive(Debug)]
-        #[allow(unused)]
-        struct SubscriptionProtocol<'a> {
-            name: &'a String,
-            allow_inbound: &'a bool,
-            max_response_size_in_bytes: &'a usize,
-            our_handshake: &'a Vec<u8>,
-            handshake_verification: Option<&'static str>
+impl SubscriptionProtocol {
+    /// Create a new [`RequestResponseProtocol`], providing the 
+    /// multistream protocol name that it will match on.
+    pub fn new(name: impl Into<String>, our_handshake: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            allow_inbound: false,
+            max_response_size_in_bytes: usize::MAX,
+            our_handshake,
         }
+    }
 
-        let Self {
-            name,
-            allow_inbound,
-            max_response_size_in_bytes,
-            our_handshake,
-            handshake_verification
-        } = self;
+    /// Allow inbound connections? This default to false. Allowing inbound
+    /// connections will accept and provide request payloads in our events,
+    /// allowing us to respond to them.
+    pub fn allow_inbound(mut self, allow: bool) -> Self {
+        self.allow_inbound = allow;
+        self
+    }
 
-        SubscriptionProtocol { 
-            name, 
-            allow_inbound,
-            max_response_size_in_bytes,
-            our_handshake,
-            handshake_verification: handshake_verification.as_ref().map(|_| "<function>")
-        }.fmt(f)
+    /// Set the maximum size of incoming messages for this protocol, in bytes.
+    pub fn with_max_response_size(mut self, max_response_size_in_bytes: usize) -> Self {
+        self.max_response_size_in_bytes = max_response_size_in_bytes;
+        self
     }
 }
 
@@ -407,15 +376,8 @@ pub struct Connection<Stream, Platform> {
     requests: BTreeMap<YamuxStreamId, RequestState>,
     subscriptions: Vec<SubscriptionDetails>,
     next_buf: VecDeque<Message>,
-    handlers: Vec<HandlerFn<Stream, Platform>>,
     marker: PhantomData<(Platform,)>,
 }
-
-/// A handler that can run on each message, giving the message back if it should
-/// be passed to the next handler or returning `None` if it should not.
-type HandlerFn<Stream, Platform> = Arc<
-    dyn Fn(&mut Connection<Stream, Platform>, Message) -> Pin<Box<dyn Future<Output = Option<Message>>>>
->;
 
 struct SubscriptionDetails {
     protocol_name: String,
@@ -549,25 +511,6 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         mut stream: Stream,
         remote_peer_id: Option<PeerId>,
     ) -> Result<Self, ConnectionError> {
-        let handlers: Vec<HandlerFn<_,_>> = config
-            .protocols
-            .iter()
-            .filter_map(|(id, proto)| {
-                match proto {
-                    AnyProtocol::RequestResponse(p) => {
-                        p.response.as_ref().map(|f| {
-                            let f = f.clone();
-
-                        })
-                    },
-                    AnyProtocol::Subscription(p) => {
-                        p.handshake_verification.as_ref().map(|f| {
-
-                        })
-                    }
-                }
-            }).collect();
-
         // Agree to use the noise protocol.
         Platform::timeout(
             config.multistream_timeout,
@@ -633,7 +576,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
     /// This returns a [`RequestId`]. We will get back exactly one response using this ID from [`Self::next`].
     pub fn request(
         &mut self,
-        protocol: &str,
+        protocol_id: RequestProtocolId,
         request: Vec<u8>,
     ) -> Result<RequestId, ConnectionError> {
         // Open a stream.
@@ -664,8 +607,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
     /// call [`Self::next`], until the subscription is closed, cancelled or returns an error.
     pub fn subscribe<F: FnMut(Vec<u8>) -> bool + 'static>(
         &mut self,
-        protocol: impl Into<String>,
-        handshake: Vec<u8>,
+        protocol_id: SubscriptionProtocolId,
         validate: F,
     ) -> Result<SubscriptionId, ConnectionError> {
         let protocol = protocol.into();
@@ -886,7 +828,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                                 continue;
                             }
                             // They closed the stream; our handshake was rejected.
-                            OutputState::Closed => {
+                            OutputState::Closed(CloseReason::ClosedByRemote) => {
                                 self.subscriptions.swap_remove(index);
                                 return Ok(Some(Message::Notification {
                                     id,
