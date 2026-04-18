@@ -691,6 +691,10 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         //     - if allow_inbound is true then set it and also open outbound channel for same
         //     - if allow_inbound is false then we reject it
         //   - if it doesn't relate to anything then an easy rejection.
+        //
+        // The key learning here: only one subscription can exist for a given protocol, which
+        // means ONE inbound stream (for them to send us data) and one outbound stream (for us
+        // to send them data). Both must exist for it to be considered open.
 
         if let Some(details) = self
             .subscription_details
