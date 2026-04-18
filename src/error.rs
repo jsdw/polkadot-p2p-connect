@@ -1,5 +1,5 @@
 use super::SubscriptionId;
-use crate::layers::{multistream, noise, yamux_multistream};
+use crate::{RequestProtocolId, SubscriptionProtocolId, layers::{multistream, noise, yamux_multistream}};
 
 /// An error that can occur establishing a connection with some peer.
 #[derive(Debug, thiserror::Error)]
@@ -11,6 +11,10 @@ pub enum ConnectionError {
     YamuxNegotiationTimeout,
     #[error("timeout exchanging noise handshakes")]
     NoiseHandshakeTimeout,
+    #[error("subscription protocol with ID {0} was not configured")]
+    SubscriptionProtocolNotFound(SubscriptionProtocolId),
+    #[error("request protocol with ID {0} was not configured")]
+    RequestProtocolNotFound(RequestProtocolId),
     #[error("already subscribed to protocol")]
     AlreadySubscribed(SubscriptionId),
     #[error("internal protocol error: {0}")]
