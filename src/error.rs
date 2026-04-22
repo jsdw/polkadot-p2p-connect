@@ -1,4 +1,3 @@
-use super::SubscriptionId;
 use crate::{RequestProtocolId, SubscriptionProtocolId, layers::{multistream, noise, yamux_multistream}};
 
 /// An error that can occur establishing a connection with some peer.
@@ -16,7 +15,7 @@ pub enum ConnectionError {
     #[error("request protocol with ID {0} was not configured")]
     RequestProtocolNotFound(RequestProtocolId),
     #[error("already subscribed to protocol")]
-    AlreadySubscribed(SubscriptionId),
+    AlreadySubscribed(SubscriptionProtocolId),
     #[error("internal protocol error: {0}")]
     ProtocolError(#[from] ProtocolError),
 }
