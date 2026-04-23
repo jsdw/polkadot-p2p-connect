@@ -143,7 +143,9 @@ impl YamuxStreamId {
     }
     /// Increment the stream ID to the next one for clients to use (always an odd number)
     pub fn increment(&mut self) {
-        self.0 += 2
+        // This will eventually overflow in theory, but it'll take a long
+        // time to get through 2 billion stream IDs so I'm not worried.
+        self.0 = self.0.checked_add(2).expect("stream ID has overflown")
     }
     /// Is the stream ID an even number (ie a valid stream to be received)
     pub fn is_even(&self) -> bool {

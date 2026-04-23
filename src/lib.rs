@@ -14,7 +14,9 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
-use core::marker::PhantomData;
+use core::marker::{Unpin, PhantomData};
+use core::pin::{Pin, pin};
+use core::task::Poll;
 use core::time::Duration;
 use core::usize;
 use layers::{
@@ -37,13 +39,50 @@ pub use crate::utils::peer_id::PeerId;
 
 /// This trait provides any core features that we need which may vary by platform.
 pub trait PlatformT {
+    /// The type returned from [`PlatformT::sleep()`]. This should
+    /// be a future which resolves after the given sleep duration.
+    type Sleep: Future<Output = ()> + Unpin + Send + 'static;
+
     /// Fill the given buffer with random bytes.
     fn fill_with_random_bytes(bytes: &mut [u8]);
-    /// Returns Err(()) if the given future times out, else returns the output from the future.
-    fn timeout<F: core::future::Future<Output = R>, R>(
-        duration: Duration,
-        fut: F,
-    ) -> impl Future<Output = Result<R, ()>>;
+    /// Sleep for the given duration
+    fn sleep(duration: Duration) -> Self::Sleep;
+}
+
+/// A naive timeout implementation based on [`PlatformT::sleep`]
+fn timeout<P: PlatformT, R, F: Future<Output = R> + Unpin>(
+    duration: core::time::Duration, 
+    mut fut: F
+) -> impl Future<Output = Result<R, ()>> {
+    let mut s = P::sleep(duration);
+    core::future::poll_fn(move |cx| {
+        if let Poll::Ready(val) = Pin::new(&mut fut).poll(cx) {
+            Poll::Ready(Ok(val))
+        } else if let Poll::Ready(()) = Pin::new(&mut s).poll(cx) {
+            Poll::Ready(Err(()))
+        } else {
+            Poll::Pending
+        }
+    })
+}
+
+struct Timeouts<Platform: PlatformT, Res> {
+    // These are added in order, and so we only need
+    // to check whether the first future is ready.
+    sleeps: VecDeque<(Res, Platform::Sleep)>
+}
+// TODO:
+// Either:
+// 1. Don't have timeouts in requests. Let the user do this, or
+// 2. call Platform::sleep for each request and push them to this
+//    above queue. Have a method which returns an iterator of all
+//    of the futures in this queue which are Ready (starting at beginning)
+//    This ignores the fact that requests which resolve won't clean up,
+//    and relies on it being cheap to cleanup all of the sleeps and that
+//    not too many get added.
+
+impl <Platform: PlatformT, Res> Timeouts<Platform, Res> {
+    fn next() -> Option
 }
 
 // -----------------------------------------------------------
@@ -104,7 +143,7 @@ impl RequestProtocol {
         Self {
             name: name.into(),
             allow_inbound: false,
-            timeout: Duration::from_secs(u64::MAX),
+            timeout: Duration::from_secs(600),
             max_response_size_in_bytes: usize::MAX,
         }
     }
@@ -165,18 +204,18 @@ pub struct SubscriptionProtocol {
     allow_inbound: bool,
     max_response_size_in_bytes: usize,
     our_handshake: Vec<u8>,
-    validate_their_handshake: DebugIgnore<Arc<dyn Fn(Vec<u8>) -> bool>>,
+    validate_their_handshake: DebugIgnore<Arc<dyn Fn(Vec<u8>) -> bool + Send + Sync>>,
 }
 
 impl SubscriptionProtocol {
     /// Create a new [`SubscriptionProtocol`], providing the
     /// multistream protocol name that it will match on.
-    pub fn new<F: 'static + Fn(Vec<u8>) -> bool>(
+    pub fn new<F: 'static + Fn(Vec<u8>) -> bool + Send + Sync>(
         name: impl Into<String>,
         our_handshake: Vec<u8>,
         validate_their_handshake: F,
     ) -> Self {
-        let validater: Arc<dyn Fn(Vec<u8>) -> bool> = Arc::new(validate_their_handshake);
+        let validater: Arc<dyn Fn(Vec<u8>) -> bool + Send + Sync> = Arc::new(validate_their_handshake);
         Self {
             name: name.into(),
             allow_inbound: true,
@@ -324,6 +363,7 @@ enum RequestState {
 struct RequestDetails {
     protocol_id: RequestProtocolId,
     protocol: RequestProtocol,
+    timeouts: Timeouts<YamuxStreamId>,
 }
 
 struct SubscriptionDetails {
@@ -474,12 +514,13 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         remote_peer_id: Option<PeerId>,
     ) -> Result<Self, ConnectionError> {
         // Agree to use the noise protocol.
-        Platform::timeout(
-            config.multistream_timeout,
-            multistream::negotiate_dialer(&mut stream, "/noise"),
-        )
-        .await
-        .map_err(|()| ConnectionError::NoiseNegotiationTimeout)??;
+        {
+            let negotiate_fut = multistream::negotiate_dialer(&mut stream, "/noise");
+            let negotiate_fut = pin!(negotiate_fut);
+            timeout::<Platform, _, _>(config.multistream_timeout, negotiate_fut)
+                .await
+                .map_err(|()| ConnectionError::NoiseNegotiationTimeout)??;
+        }
 
         // Generate/use an identity for ourselves.
         let identity = match config.identity_secret {
@@ -492,20 +533,23 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         };
 
         // Establish our encrypted noise session and find the remote Peer ID
-        let (mut noise_stream, remote_id) = Platform::timeout(
+        let handshake_fut = noise::handshake_dialer::<_, Platform>(stream, &identity, remote_peer_id.as_ref());
+        let handshake_fut = pin!(handshake_fut);
+        let (mut noise_stream, remote_id) = timeout::<Platform, _, _>(
             config.noise_timeout,
-            noise::handshake_dialer::<_, Platform>(stream, &identity, remote_peer_id.as_ref()),
+            handshake_fut,
         )
         .await
         .map_err(|()| ConnectionError::NoiseHandshakeTimeout)??;
 
         // Agree to use the yamux protocol in this noise stream.
-        Platform::timeout(
-            config.multistream_timeout,
-            multistream::negotiate_dialer(&mut noise_stream, "/yamux/1.0.0"),
-        )
-        .await
-        .map_err(|()| ConnectionError::YamuxNegotiationTimeout)??;
+        {
+            let yamux_fut = multistream::negotiate_dialer(&mut noise_stream, "/yamux/1.0.0");
+            let yamux_fut = pin!(yamux_fut);
+            timeout::<Platform, _, _>(config.multistream_timeout, yamux_fut)
+                .await
+                .map_err(|()| ConnectionError::YamuxNegotiationTimeout)??;
+        }
 
         // Wrap our noise stream in a yamux session (we'll be using yamux substreams), and wrap
         // that in a YamuxMultistream adaptor to handle multistream negotiation on top of these
@@ -621,7 +665,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
     /// Begin the subscription on one of our subscription protocols. We will get back a stream
     /// of notification messages against the provided [`SubscriptionProtocolId`] when
     /// call [`Self::next`], until the subscription is closed, cancelled or returns an error.
-    pub fn subscribe<F: FnMut(Vec<u8>) -> bool + 'static>(
+    pub fn subscribe(
         &mut self,
         protocol_id: SubscriptionProtocolId,
     ) -> Result<(), ConnectionError> {
@@ -683,6 +727,15 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
     /// Cancel a subscription. This makes a best-effort attempt to cancel an in-flight subscription when driven by [`Self::next`],
     /// and will lead to a [`SubscriptionResponse::Closed`] message being emitted for the given subscription ID.
     pub fn cancel_subscription(&mut self, id: SubscriptionProtocolId) {
+        self.cancel_subscription_silently(id);
+
+        self.next_buf.push_back(Message::Notification {
+            protocol_id: id,
+            res: SubscriptionResponse::Closed,
+        });
+    }
+
+    fn cancel_subscription_silently(&mut self, id: SubscriptionProtocolId) {
         // Find the protocol
         let Some(p) = self
             .subscription_details
@@ -701,11 +754,6 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
 
         p.our_stream = SubscriptionStreamState::Closed;
         p.their_stream = SubscriptionStreamState::Closed;
-
-        self.next_buf.push_back(Message::Notification {
-            protocol_id: id,
-            res: SubscriptionResponse::Closed,
-        });
     }
 
     /// Drive this connection, making progress and returning messages as they are received.
@@ -867,8 +915,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // They rejected our protocol, oh no! Emit a failed message and tidy up.
                             OutputState::OutgoingRejected => {
-                                p.our_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -891,7 +938,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                                     }
                                 } else {
                                     // Else it's all gone wrong, close and tidy.
-                                    self.cancel_subscription(protocol_id);
+                                    self.cancel_subscription_silently(protocol_id);
                                     return Ok(Some(Message::Notification {
                                         protocol_id,
                                         res: SubscriptionResponse::Error(
@@ -902,8 +949,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // Closing at this stage means they rejected our handshake.
                             OutputState::Closed(CloseReason::ClosedByRemote) => {
-                                p.our_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -913,8 +959,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // .. Or that the protocol message was too large.
                             OutputState::Closed(CloseReason::IncomingMessageTooLarge) => {
-                                p.our_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(SubscriptionResponseError::RemotePayloadTooLarge),
@@ -922,7 +967,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // This would make no sense given we initiated the stream.
                             OutputState::IncomingProtocol(_) => {
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -935,16 +980,14 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                     SubscriptionStreamState::Open { .. } => {
                         match output.state {
                             OutputState::Closed(CloseReason::ClosedByRemote) => {
-                                p.our_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Closed,
                                 }));
                             },
                             OutputState::Closed(CloseReason::IncomingMessageTooLarge) => {
-                                p.our_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(SubscriptionResponseError::RemotePayloadTooLarge),
@@ -952,7 +995,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // Any other output at this stage is a protocol error.
                             _ => {
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -1021,7 +1064,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                                     }
                                 } else {
                                     // Else it's all gone wrong, close and tidy.
-                                    self.cancel_subscription(protocol_id);
+                                    self.cancel_subscription_silently(protocol_id);
                                     return Ok(Some(Message::Notification {
                                         protocol_id,
                                         res: SubscriptionResponse::Error(
@@ -1031,16 +1074,14 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                                 }
                             },
                             OutputState::Closed(CloseReason::ClosedByRemote) => {
-                                p.their_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Closed,
                                 }));
                             },
                             OutputState::Closed(CloseReason::IncomingMessageTooLarge) => {
-                                p.their_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(SubscriptionResponseError::RemotePayloadTooLarge),
@@ -1048,7 +1089,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // Any other output at this stage is a protocol error.
                             _ => {
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -1067,16 +1108,14 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                                 }))
                             },
                             OutputState::Closed(CloseReason::ClosedByRemote) => {
-                                p.their_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Closed,
                                 }));
                             },
                             OutputState::Closed(CloseReason::IncomingMessageTooLarge) => {
-                                p.their_stream = SubscriptionStreamState::Closed;
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(SubscriptionResponseError::RemotePayloadTooLarge),
@@ -1084,7 +1123,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             },
                             // Any other output at this stage is a protocol error.
                             _ => {
-                                self.cancel_subscription(protocol_id);
+                                self.cancel_subscription_silently(protocol_id);
                                 return Ok(Some(Message::Notification {
                                     protocol_id,
                                     res: SubscriptionResponse::Error(
@@ -1130,5 +1169,45 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use core::future::Future;
+
+    fn assert_send<T: Send>() {}
+
+    // Just assert at compile time that a Connection impls Send
+    // so long as the Platform + AsyncStream impls do.
+    #[allow(unused)]
+    fn is_connection_send() {
+        struct TestPlatformStub;
+        impl PlatformT for TestPlatformStub {
+            type Sleep = core::future::Pending<()>;
+
+            fn fill_with_random_bytes(_bytes: &mut [u8]) {
+                unimplemented!()
+            }
+            fn sleep(duration: Duration) -> Self::Sleep {
+                core::future::pending()
+            }
+        }
+
+        struct TestStreamStub;
+        impl AsyncStream for TestStreamStub {
+            fn read_exact(
+                &mut self,
+                _buf: &mut [u8],
+            ) -> impl Future<Output = Result<(), AsyncStreamError>> {
+                core::future::pending()
+            }
+            fn write_all(&mut self, _data: &[u8]) -> impl Future<Output = Result<(), AsyncStreamError>> {
+                core::future::pending()
+            }
+        }
+
+        assert_send::<Connection<TestStreamStub, TestPlatformStub>>();
     }
 }
