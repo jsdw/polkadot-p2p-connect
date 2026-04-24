@@ -453,9 +453,9 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
                     BufferedOutboundMessage::Data(mut outbound_data) => {
                         let bytes_to_send = usize::min(stream.send_window, outbound_data.len());
                         tracing::debug!(target: LOG_TARGET, "sending {bytes_to_send} DATA bytes on stream {stream_id}");
-    
+
                         // If we can't send anything on this stream, put the message back on the queue and break
-                        // to stop pulling items from this streams queue. We need a window update before we can 
+                        // to stop pulling items from this streams queue. We need a window update before we can
                         // send more data on this stream.
                         if bytes_to_send == 0 {
                             stream
@@ -463,13 +463,13 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
                                 .push_back(BufferedOutboundMessage::Data(outbound_data));
                             break;
                         }
-    
+
                         // VecDeque is two slices internally, so we work out how many bytes of
                         // each slice we need to send to satisfy the above.
                         let (a, b) = outbound_data.as_slices();
                         let a_len = usize::min(bytes_to_send, a.len());
                         let b_len = bytes_to_send.saturating_sub(a.len());
-    
+
                         // Send the appropriate header and then the corresponding bytes. Because
                         // we have two slices above, we break this into two sends if necessary.
                         self.inner
@@ -478,15 +478,17 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
                         self.inner.write_all(&a[..a_len]).await?;
                         if b_len > 0 {
                             self.inner
-                                .write_all(&YamuxHeader::send_data(stream_id, b_len as u32).encode())
+                                .write_all(
+                                    &YamuxHeader::send_data(stream_id, b_len as u32).encode(),
+                                )
                                 .await?;
                             self.inner.write_all(&b[..b_len]).await?;
                         }
-    
+
                         // Decrement the send window. When this runs out we'll be forced to
                         // wait for a window update from them before we can send more.
                         stream.send_window = stream.send_window.saturating_sub(bytes_to_send);
-    
+
                         // If we didn't send all of the bytes, then drain what we did send and put
                         // the message back onto the queue to be tried again later.
                         if bytes_to_send != outbound_data.len() {
@@ -498,7 +500,6 @@ impl<S: async_stream::AsyncStream> YamuxSession<S> {
                     }
                 }
             }
-
         }
 
         // Remove our stored stream info for any streams we've closed on our end.

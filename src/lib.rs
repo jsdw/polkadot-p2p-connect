@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
-use core::marker::{Unpin, PhantomData};
+use core::marker::{PhantomData, Unpin};
 use core::pin::{Pin, pin};
 use core::task::Poll;
 use core::time::Duration;
@@ -26,6 +26,7 @@ use layers::{
 use utils::debug_ignore::DebugIgnore;
 use utils::opaque_id::OpaqueId;
 use utils::peer_id;
+use utils::timers::Timers;
 
 // Re-export anything that is part of the public APIs.
 pub use crate::error::{ConnectionError, ProtocolError, StreamError};
@@ -51,8 +52,8 @@ pub trait PlatformT {
 
 /// A naive timeout implementation based on [`PlatformT::sleep`]
 fn timeout<P: PlatformT, R, F: Future<Output = R> + Unpin>(
-    duration: core::time::Duration, 
-    mut fut: F
+    duration: core::time::Duration,
+    mut fut: F,
 ) -> impl Future<Output = Result<R, ()>> {
     let mut s = P::sleep(duration);
     core::future::poll_fn(move |cx| {
@@ -64,25 +65,6 @@ fn timeout<P: PlatformT, R, F: Future<Output = R> + Unpin>(
             Poll::Pending
         }
     })
-}
-
-struct Timeouts<Platform: PlatformT, Res> {
-    // These are added in order, and so we only need
-    // to check whether the first future is ready.
-    sleeps: VecDeque<(Res, Platform::Sleep)>
-}
-// TODO:
-// Either:
-// 1. Don't have timeouts in requests. Let the user do this, or
-// 2. call Platform::sleep for each request and push them to this
-//    above queue. Have a method which returns an iterator of all
-//    of the futures in this queue which are Ready (starting at beginning)
-//    This ignores the fact that requests which resolve won't clean up,
-//    and relies on it being cheap to cleanup all of the sleeps and that
-//    not too many get added.
-
-impl <Platform: PlatformT, Res> Timeouts<Platform, Res> {
-    fn next() -> Option
 }
 
 // -----------------------------------------------------------
@@ -132,7 +114,7 @@ impl AnyProtocol {
 pub struct RequestProtocol {
     name: String,
     allow_inbound: bool,
-    timeout: Duration,
+    timeout: Option<Duration>,
     max_response_size_in_bytes: usize,
 }
 
@@ -143,7 +125,7 @@ impl RequestProtocol {
         Self {
             name: name.into(),
             allow_inbound: false,
-            timeout: Duration::from_secs(600),
+            timeout: None,
             max_response_size_in_bytes: usize::MAX,
         }
     }
@@ -165,7 +147,7 @@ impl RequestProtocol {
     /// Configure the request timeout. If outgoing requests take more than this
     /// amount of time to receive a response then an error will be returned instead.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
         self
     }
 }
@@ -215,7 +197,8 @@ impl SubscriptionProtocol {
         our_handshake: Vec<u8>,
         validate_their_handshake: F,
     ) -> Self {
-        let validater: Arc<dyn Fn(Vec<u8>) -> bool + Send + Sync> = Arc::new(validate_their_handshake);
+        let validater: Arc<dyn Fn(Vec<u8>) -> bool + Send + Sync> =
+            Arc::new(validate_their_handshake);
         Self {
             name: name.into(),
             allow_inbound: true,
@@ -343,12 +326,12 @@ impl<Platform: PlatformT> Configuration<Platform> {
 // -----------------------------------------------------------
 
 /// A connection to a single peer.
-pub struct Connection<Stream, Platform> {
+pub struct Connection<Stream, Platform: PlatformT> {
     yamux: yamux_multistream::YamuxMultistream<noise::NoiseStream<Stream>>,
     remote_id: PeerId,
     our_id: PeerId,
     subscription_details: Vec<SubscriptionDetails>,
-    request_details: Vec<RequestDetails>,
+    request_details: Vec<RequestDetails<Platform>>,
     incoming_requests: BTreeMap<YamuxStreamId, RequestProtocolId>,
     inflight_requests: BTreeMap<YamuxStreamId, (RequestProtocolId, RequestState)>,
     next_buf: VecDeque<Message>,
@@ -360,10 +343,10 @@ enum RequestState {
     AwaitingResponsePayload,
 }
 
-struct RequestDetails {
+struct RequestDetails<Platform: PlatformT> {
     protocol_id: RequestProtocolId,
     protocol: RequestProtocol,
-    timeouts: Timeouts<YamuxStreamId>,
+    timeouts: Option<Timers<YamuxStreamId, Platform>>,
 }
 
 struct SubscriptionDetails {
@@ -468,6 +451,8 @@ pub enum RequestResponse {
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum RequestResponseError {
+    #[error("the request timed out waiting for a response")]
+    Timeout,
     #[error("the remote rejected the protocol we handed it")]
     ProtocolRejected,
     #[error("the remote rejected the payload we handed it")]
@@ -533,14 +518,13 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         };
 
         // Establish our encrypted noise session and find the remote Peer ID
-        let handshake_fut = noise::handshake_dialer::<_, Platform>(stream, &identity, remote_peer_id.as_ref());
+        let handshake_fut =
+            noise::handshake_dialer::<_, Platform>(stream, &identity, remote_peer_id.as_ref());
         let handshake_fut = pin!(handshake_fut);
-        let (mut noise_stream, remote_id) = timeout::<Platform, _, _>(
-            config.noise_timeout,
-            handshake_fut,
-        )
-        .await
-        .map_err(|()| ConnectionError::NoiseHandshakeTimeout)??;
+        let (mut noise_stream, remote_id) =
+            timeout::<Platform, _, _>(config.noise_timeout, handshake_fut)
+                .await
+                .map_err(|()| ConnectionError::NoiseHandshakeTimeout)??;
 
         // Agree to use the yamux protocol in this noise stream.
         {
@@ -578,6 +562,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
             .map(|(id, p)| RequestDetails {
                 protocol_id: RequestProtocolId(id.get()),
                 protocol: p.clone(),
+                timeouts: p.timeout.map(|d| Timers::new(d)),
             })
             .collect();
 
@@ -614,7 +599,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         // Find the protocol details
         let Some(p) = self
             .request_details
-            .iter()
+            .iter_mut()
             .find(|p| p.protocol_id == protocol_id)
         else {
             return Err(ConnectionError::RequestProtocolNotFound(protocol_id));
@@ -625,6 +610,11 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
             Some(&p.protocol.name),
             p.protocol.max_response_size_in_bytes,
         )?;
+
+        // If there is a timeout configured then add it.
+        if let Some(timeouts) = &mut p.timeouts {
+            timeouts.add(stream_id);
+        }
 
         // Save the request to send once the stream is open.
         self.inflight_requests.insert(
@@ -765,6 +755,11 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         loop {
             // Drain any local messages we need to emit first
             while let Some(message) = self.next_buf.pop_front() {
+                return Ok(Some(message));
+            }
+
+            // Look for and handle any timed out requests next
+            if let Some(message) = self.handle_request_timeouts() {
                 return Ok(Some(message));
             }
 
@@ -1170,6 +1165,28 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
             }
         }
     }
+
+    /// Work through any request timeouts, returning a message if there is something we should
+    /// hand back to the user, and returning `None`` if nothing further to do.
+    fn handle_request_timeouts(&mut self) -> Option<Message> {
+        for details in &mut self.request_details {
+            let Some(timeouts) = &mut details.timeouts else {
+                continue;
+            };
+            let Some(stream_id) = timeouts.try_next() else {
+                continue;
+            };
+            let Some(protocol_id) = self.incoming_requests.remove(&stream_id) else {
+                continue;
+            };
+            return Some(Message::Response {
+                id: RequestId(stream_id),
+                protocol_id,
+                res: RequestResponse::Error(RequestResponseError::Timeout),
+            });
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1203,7 +1220,10 @@ mod test {
             ) -> impl Future<Output = Result<(), AsyncStreamError>> {
                 core::future::pending()
             }
-            fn write_all(&mut self, _data: &[u8]) -> impl Future<Output = Result<(), AsyncStreamError>> {
+            fn write_all(
+                &mut self,
+                _data: &[u8],
+            ) -> impl Future<Output = Result<(), AsyncStreamError>> {
                 core::future::pending()
             }
         }
