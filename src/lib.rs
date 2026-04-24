@@ -824,6 +824,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
                             // We got a response back! Give it to the user.
                             OutputState::Data(bytes) => {
                                 self.inflight_requests.remove(&stream_id);
+                                self.yamux.close_stream_immediately(stream_id);
                                 return Ok(Some(Message::Response {
                                     id: RequestId(stream_id),
                                     protocol_id,
