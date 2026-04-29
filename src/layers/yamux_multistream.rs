@@ -217,6 +217,15 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
     /// Drive our yamux multistream machine, returning output messages as they come in
     /// and pushing inputs out.
+    /// 
+    /// # Cancel Safety
+    /// 
+    /// This function is cancel-safe.
+    //
+    // Dev note: The cancel-safety is easily verifiable because next() calls next_inner() which
+    // has only one `.await` which calls the cancel-safe YamusSession::next(). Since no harm is done
+    // if we were to cancel and restart at this point (which is anyway at the start of the function),
+    // we can be confident that it is cancel-safe.
     pub async fn next(&mut self) -> Option<Result<Output, Error>> {
         self.next_inner().await.transpose()
     }

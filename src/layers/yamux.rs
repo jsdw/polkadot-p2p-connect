@@ -1422,6 +1422,146 @@ mod test {
         assert_eq!(&*yamux.data(), data as &[u8]);
     }
 
+    // --- Cancel-safety tests ---
+    //
+    // `next()` is cancel-safe: dropping the future returned by `next()` before it
+    // resolves (i.e. while it is pending) leaves the `YamuxSession` in a consistent
+    // state so that the *next* call to `next()` produces exactly the result that
+    // would have been produced had the first call been allowed to run to completion.
+    //
+    // The mechanism: `ReadWriteJoin` stores the in-progress read future in
+    // `self.read_fut` before returning `Poll::Pending`, so subsequent `call()`
+    // invocations resume that same future rather than recreating it.
+    //
+    // The critical test is the mid-frame scenario below: we feed *only* the 12-byte
+    // Yamux header to the stream and then cancel `next()`.  The header bytes are now
+    // consumed from the buffer.  If `next()` were not cancel-safe it would recreate
+    // the read future on the following call, see only the data bytes in the buffer,
+    // try to parse them as a header, and produce garbage / an error.  A cancel-safe
+    // implementation instead resumes the paused state-machine (which already holds
+    // the decoded header) and simply waits for the missing data bytes.
+
+    #[test]
+    fn next_is_cancel_safe_mid_data_read() {
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream.clone(), stream);
+
+        // Open a remote stream so there is an active stream to receive data on.
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let open_res = next_expecting_output(&mut yamux);
+        assert_eq!(open_res.state, OutputState::OpenedByRemote);
+
+        // Queue the DATA header only – no body bytes yet.
+        let data = b"cancel safe test";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+
+        // Call next(): the read future decodes the header then waits for the body
+        // bytes which are not yet available.  block_on drops the future on Pending,
+        // simulating a cancellation.
+        let pending = block_on(yamux.next());
+        assert!(pending.is_none(), "expected Pending: data bytes not yet in buffer");
+
+        // The header bytes are now gone from the read buffer.  If next() were not
+        // cancel-safe a fresh read future would misinterpret the following data bytes
+        // as a header.  Supply the body bytes now.
+        handle.extend(data.iter().copied());
+
+        // next() must resume from the paused state-machine (header already decoded)
+        // and deliver the correct data without any error.
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data.len()));
+        assert_eq!(&*yamux.data(), data as &[u8]);
+    }
+
+    #[test]
+    fn next_is_cancel_safe_before_any_bytes() {
+        // Cancelling next() repeatedly before any bytes are available must not
+        // corrupt the session; it should behave identically to a single call once
+        // data eventually arrives.
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream.clone(), stream);
+
+        // Cancel three times with an empty read buffer.
+        assert!(block_on(yamux.next()).is_none());
+        assert!(block_on(yamux.next()).is_none());
+        assert!(block_on(yamux.next()).is_none());
+
+        // Supply a complete open + data frame.
+        let data = b"hello after cancels";
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+        handle.extend(data.iter().copied());
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::OpenedByRemote);
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::Data(data.len()));
+        assert_eq!(&*yamux.data(), data as &[u8]);
+    }
+
+    #[test]
+    fn next_is_cancel_safe_repeated_mid_read_cancellations() {
+        // Repeated cancellations after the header has been consumed but before
+        // the body arrives must not accumulate bad state.
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream.clone(), stream);
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let _ = next_expecting_output(&mut yamux); // OpenedByRemote
+
+        let data = b"resilient";
+
+        // Header only – no body.
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data.len() as u32).encode());
+
+        // Cancel three times while the read future is suspended awaiting the body.
+        assert!(block_on(yamux.next()).is_none());
+        assert!(block_on(yamux.next()).is_none());
+        assert!(block_on(yamux.next()).is_none());
+
+        // Now supply the body.
+        handle.extend(data.iter().copied());
+
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.stream_id, YamuxStreamId::new(2));
+        assert_eq!(res.state, OutputState::Data(data.len()));
+        assert_eq!(&*yamux.data(), data as &[u8]);
+    }
+
+    #[test]
+    fn next_is_cancel_safe_then_further_frames_work() {
+        // After a mid-frame cancellation and successful resumption, the session
+        // continues to operate correctly for subsequent frames.
+        let stream = MockStream::new();
+        let mut handle = stream.handle();
+        let mut yamux = YamuxSession::new(stream.clone(), stream);
+
+        handle.extend(YamuxHeader::open_stream(YamuxStreamId::new(2)).encode());
+        let _ = next_expecting_output(&mut yamux); // OpenedByRemote
+
+        // First frame: cancel mid-read.
+        let data1 = b"first";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data1.len() as u32).encode());
+        assert!(block_on(yamux.next()).is_none()); // cancel
+        handle.extend(data1.iter().copied());
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::Data(data1.len()));
+        assert_eq!(&*yamux.data(), data1 as &[u8]);
+
+        // Second frame: delivered normally, proving session state is intact.
+        let data2 = b"second";
+        handle.extend(YamuxHeader::send_data(YamuxStreamId::new(2), data2.len() as u32).encode());
+        handle.extend(data2.iter().copied());
+        let res = next_expecting_output(&mut yamux);
+        assert_eq!(res.state, OutputState::Data(data2.len()));
+        assert_eq!(&*yamux.data(), data2 as &[u8]);
+    }
+
     #[test]
     fn window_update_is_processed() {
         let stream = MockStream::new();
