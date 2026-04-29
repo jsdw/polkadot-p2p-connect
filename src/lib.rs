@@ -14,7 +14,7 @@ mod configuration;
 mod connection;
 
 pub use crate::error::{ConnectionError, ProtocolError, StreamError};
-pub use crate::utils::async_stream::{AsyncStream, Error as AsyncStreamError};
+pub use crate::utils::async_stream::{AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError};
 pub use crate::utils::peer_id::PeerId;
 
 pub use platform::PlatformT;

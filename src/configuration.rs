@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::protocol::{AnyProtocol, Protocol};
 use crate::platform::PlatformT;
 use crate::utils::opaque_id::OpaqueId;
-use crate::utils::async_stream::AsyncStream;
+use crate::utils::async_stream::{AsyncRead, AsyncWrite};
 use crate::utils::peer_id::PeerId;
 use crate::connection::Connection;
 use crate::error::ConnectionError;
@@ -65,11 +65,12 @@ impl<Platform: PlatformT> Configuration<Platform> {
     /// # Cancel safety
     /// 
     /// This method is not cancel safe.
-    pub async fn connect<Stream: AsyncStream>(
+    pub async fn connect<R: AsyncRead + 'static, W: AsyncWrite + 'static>(
         &self,
-        stream: Stream,
-    ) -> Result<Connection<Stream, Platform>, ConnectionError> {
-        Connection::from_stream(self, stream, None).await
+        reader: R,
+        writer: W,
+    ) -> Result<Connection<R, W, Platform>, ConnectionError> {
+        Connection::from_stream(self, reader, writer, None).await
     }
 
     /// Connect to a peer given some read/write byte stream that has already been established with it,
@@ -78,11 +79,12 @@ impl<Platform: PlatformT> Configuration<Platform> {
     /// # Cancel safety
     /// 
     /// This method is not cancel safe.
-    pub async fn connect_to_peer<Stream: AsyncStream>(
+    pub async fn connect_to_peer<R: AsyncRead + 'static, W: AsyncWrite + 'static>(
         &self,
-        stream: Stream,
+        reader: R,
+        writer: W,
         peer_id: PeerId,
-    ) -> Result<Connection<Stream, Platform>, ConnectionError> {
-        Connection::from_stream(self, stream, Some(peer_id)).await
+    ) -> Result<Connection<R, W, Platform>, ConnectionError> {
+        Connection::from_stream(self, reader, writer, Some(peer_id)).await
     }
 }

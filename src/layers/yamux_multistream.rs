@@ -17,8 +17,8 @@ pub use yamux::YamuxStreamId;
 const MULTISTREAM_PROTOCOL_NAME_WITH_NEWLINE: &[u8] = b"/multistream/1.0.0\n";
 const MULTISTREAM_PROTOCOL_MAX_LEN: usize = 1024;
 
-pub struct YamuxMultistream<S> {
-    inner: YamuxSession<S>,
+pub struct YamuxMultistream<R, W> {
+    inner: YamuxSession<R, W>,
     bufs: BTreeMap<YamuxStreamId, Multistream>,
     // If this is set, we should drain messages from here before we
     // read more data from the network:
@@ -96,8 +96,8 @@ pub enum Error {
     NoProtocolsGiven,
 }
 
-impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
-    pub fn new(yamux_session: YamuxSession<S>) -> Self {
+impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static> YamuxMultistream<R, W> {
+    pub fn new(yamux_session: YamuxSession<R, W>) -> Self {
         Self {
             inner: yamux_session,
             bufs: BTreeMap::new(),
@@ -260,13 +260,14 @@ impl<S: async_stream::AsyncStream> YamuxMultistream<S> {
                         };
                         // Abort if buffer length exceeded.
                         if entry.buffer.len() + bytes.len() > entry.max_buffer_size {
+                            // drop(state);
                             self.reset_stream_immediately(stream_id);
                             return Ok(Some(Output {
                                 stream_id,
                                 state: OutputState::Closed(CloseReason::IncomingMessageTooLarge),
                             }));
                         }
-                        entry.buffer.feed(bytes);
+                        entry.buffer.feed(&bytes);
                         entry
                     }
                     yamux::OutputState::ClosedByRemote => {
@@ -487,10 +488,10 @@ mod test {
     use crate::utils::testing::{MockStream, MockStreamHandle, block_on};
     use alloc::vec;
 
-    fn yamux_multistream() -> (YamuxMultistream<MockStream>, MockStreamHandle) {
+    fn yamux_multistream() -> (YamuxMultistream<MockStream, MockStream>, MockStreamHandle) {
         let stream = MockStream::new();
         let handle = stream.handle();
-        let yamux = YamuxSession::new(stream);
+        let yamux = YamuxSession::new(stream.clone(), stream);
         (YamuxMultistream::new(yamux), handle)
     }
 
@@ -513,7 +514,7 @@ mod test {
         handle.extend(data);
     }
 
-    fn next_expecting_output(yamux: &mut YamuxMultistream<MockStream>) -> Output {
+    fn next_expecting_output(yamux: &mut YamuxMultistream<MockStream, MockStream>) -> Output {
         block_on(yamux.next())
             .expect("expecting Ready, not Pending, from YamuxMultistream::next()")
             .expect("output should not be None")

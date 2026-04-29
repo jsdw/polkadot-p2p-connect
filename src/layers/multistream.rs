@@ -1,4 +1,4 @@
-use crate::utils::async_stream::{self, AsyncStream};
+use crate::utils::async_stream::{self, AsyncRead, AsyncWrite};
 use crate::utils::varint;
 use alloc::string::String;
 use alloc::vec;
@@ -9,8 +9,10 @@ const MULTISTREAM_MAX_MSG_BYTES: u64 = 16384;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("stream error: {0}")]
-    Stream(#[from] async_stream::Error),
+    #[error("error reading from async stream: {0}")]
+    AsyncRead(#[from] async_stream::AsyncReadError),
+    #[error("error writing to async stream: {0}")]
+    AsyncWrite(#[from] async_stream::AsyncWriteError),
     #[error("varint error: {0}")]
     Varint(#[from] varint::Error),
     #[error("message too large; size is {0} bytes")]
@@ -30,21 +32,21 @@ pub enum Error {
 }
 
 /// Dialer-side multistream-select: propose a single protocol.
-pub async fn negotiate_dialer(stream: &mut impl AsyncStream, protocol: &str) -> Result<(), Error> {
+pub async fn negotiate_dialer(reader: &mut impl AsyncRead, writer: &mut impl AsyncWrite, protocol: &str) -> Result<(), Error> {
     // Send header + proposal in one write (common optimisation)
     let mut msgs = Vec::new();
     encode_msg(MULTISTREAM_HEADER, &mut msgs);
     encode_msg(protocol.as_bytes(), &mut msgs);
-    stream.write_all(&msgs).await?;
+    writer.write_all(&msgs).await?;
 
     // Read header echo
-    let resp = read_msg(stream).await?;
+    let resp = read_msg(reader).await?;
     if resp != MULTISTREAM_HEADER {
         return Err(Error::BadMultiStreamHeader(to_string(&resp)));
     }
 
     // Read protocol echo (accepted) or "na\n" (rejected)
-    let resp = read_msg(stream).await?;
+    let resp = read_msg(reader).await?;
     if resp == b"na" {
         return Err(Error::MultistreamNotSupported);
     }
@@ -62,13 +64,13 @@ fn encode_msg(payload: &[u8], out: &mut Vec<u8>) {
     out.push(b'\n');
 }
 
-async fn read_msg(stream: &mut impl AsyncStream) -> Result<Vec<u8>, Error> {
-    let length = varint::decode_from_stream(stream).await?;
+async fn read_msg(reader: &mut impl AsyncRead) -> Result<Vec<u8>, Error> {
+    let length = varint::decode_from_stream(reader).await?;
     if length > MULTISTREAM_MAX_MSG_BYTES {
         return Err(Error::MessageTooLarge(length));
     }
     let mut buf = vec![0u8; length as usize];
-    stream.read_exact(&mut buf).await?;
+    reader.read_exact(&mut buf).await?;
 
     // Expect and remove a newline at the end.
     let last_byte = buf.pop();

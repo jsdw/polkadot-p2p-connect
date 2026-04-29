@@ -1,4 +1,4 @@
-use crate::utils::async_stream::{self, AsyncStream};
+use crate::utils::async_stream::{AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError};
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -46,11 +46,12 @@ impl MockStream {
     }
 }
 
-impl AsyncStream for MockStream {
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), async_stream::Error> {
+impl AsyncRead for MockStream {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), AsyncReadError> {
         let mut inner = self.inner.borrow_mut();
 
         if inner.read_buf.len() < buf.len() {
+            drop(inner);
             return core::future::pending().await;
         }
 
@@ -60,8 +61,10 @@ impl AsyncStream for MockStream {
 
         Ok(())
     }
+}
 
-    async fn write_all(&mut self, data: &[u8]) -> Result<(), async_stream::Error> {
+impl AsyncWrite for MockStream {
+    async fn write_all(&mut self, data: &[u8]) -> Result<(), AsyncWriteError> {
         self.inner.borrow_mut().write_buf.extend(data);
         Ok(())
     }

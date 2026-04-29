@@ -12,13 +12,13 @@ use crate::layers::yamux_multistream::CloseReason;
 use crate::platform::PlatformT;
 use crate::protocol::{RequestProtocol, RequestProtocolId, SubscriptionProtocol, SubscriptionProtocolId};
 use crate::error::{ConnectionError, StreamError};
-use crate::utils::async_stream::AsyncStream;
+use crate::utils::async_stream::{AsyncRead, AsyncWrite};
 use crate::utils::peer_id::PeerId;
 use crate::platform;
 
 /// A connection to a single peer.
-pub struct Connection<Stream, Platform: PlatformT> {
-    yamux: yamux_multistream::YamuxMultistream<noise::NoiseStream<Stream>>,
+pub struct Connection<R, W, Platform: PlatformT> {
+    yamux: yamux_multistream::YamuxMultistream<noise::NoiseReadStream<R>, noise::NoiseWriteStream<W>>,
     remote_id: PeerId,
     our_id: PeerId,
     subscription_details: Vec<SubscriptionDetails>,
@@ -183,15 +183,20 @@ pub enum SubscriptionResponseError {
     MultistreamProtocolError,
 }
 
-impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
+impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Connection<R, W, Platform> {
     pub (crate) async fn from_stream(
         config: &Configuration<Platform>,
-        mut stream: Stream,
+        mut reader: R,
+        mut writer: W,
         remote_peer_id: Option<PeerId>,
     ) -> Result<Self, ConnectionError> {
         // Agree to use the noise protocol.
         {
-            let negotiate_fut = multistream::negotiate_dialer(&mut stream, "/noise");
+            let negotiate_fut = multistream::negotiate_dialer(
+                &mut reader, 
+                &mut writer, 
+                "/noise"
+            );
             let negotiate_fut = pin!(negotiate_fut);
             platform::timeout::<Platform, _, _>(config.multistream_timeout, negotiate_fut)
                 .await
@@ -209,17 +214,25 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         };
 
         // Establish our encrypted noise session and find the remote Peer ID
-        let handshake_fut =
-            noise::handshake_dialer::<_, Platform>(stream, &identity, remote_peer_id.as_ref());
+        let handshake_fut = noise::handshake_dialer::<R, W, Platform>(
+            reader,
+            writer, 
+            &identity, 
+            remote_peer_id.as_ref()
+        );
         let handshake_fut = pin!(handshake_fut);
-        let (mut noise_stream, remote_id) =
+        let (mut noise_read_stream, mut noise_write_stream, remote_id) =
             platform::timeout::<Platform, _, _>(config.noise_timeout, handshake_fut)
                 .await
                 .map_err(|()| ConnectionError::NoiseHandshakeTimeout)??;
 
         // Agree to use the yamux protocol in this noise stream.
         {
-            let yamux_fut = multistream::negotiate_dialer(&mut noise_stream, "/yamux/1.0.0");
+            let yamux_fut = multistream::negotiate_dialer(
+                &mut noise_read_stream, 
+                &mut noise_write_stream,
+                "/yamux/1.0.0"
+            );
             let yamux_fut = pin!(yamux_fut);
             platform::timeout::<Platform, _, _>(config.multistream_timeout, yamux_fut)
                 .await
@@ -229,7 +242,7 @@ impl<Stream: AsyncStream, Platform: PlatformT> Connection<Stream, Platform> {
         // Wrap our noise stream in a yamux session (we'll be using yamux substreams), and wrap
         // that in a YamuxMultistream adaptor to handle multistream negotiation on top of these
         // substreams.
-        let yamux_session = yamux::YamuxSession::new(noise_stream);
+        let yamux_session = yamux::YamuxSession::new(noise_read_stream, noise_write_stream);
         let yamux_multistream = yamux_multistream::YamuxMultistream::new(yamux_session);
 
         // Save our subscription details.

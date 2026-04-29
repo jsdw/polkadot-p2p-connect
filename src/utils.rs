@@ -1,5 +1,5 @@
 pub mod async_stream;
-pub mod cancel_safe_async_stream;
+pub mod read_write_join;
 pub mod debug_ignore;
 pub mod opaque_id;
 pub mod peer_id;
