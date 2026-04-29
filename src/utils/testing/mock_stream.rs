@@ -46,20 +46,44 @@ impl MockStream {
     }
 }
 
+/// Future returned by [`MockStream::read_exact`].
+///
+/// Re-checks the buffer on every poll so that data added between polls is
+/// found, rather than getting permanently stuck inside `pending().await`.
+struct MockReadExact<'a> {
+    inner: Rc<RefCell<MockStreamInner>>,
+    buf: &'a mut [u8],
+}
+
+impl<'a> core::future::Future for MockReadExact<'a> {
+    type Output = Result<(), AsyncReadError>;
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, _cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let needed = self.buf.len();
+        // Drain into a temporary vec first so that we can drop the `RefMut`
+        // borrow before writing into `self.buf` (accessing two fields through
+        // `Pin<&mut Self>` at the same time confuses the borrow checker).
+        let data: Option<Vec<u8>> = {
+            let mut borrow = self.inner.borrow_mut();
+            if borrow.read_buf.len() < needed {
+                None
+            } else {
+                Some(borrow.read_buf.drain(..needed).collect())
+            }
+        };
+        match data {
+            None => core::task::Poll::Pending,
+            Some(data) => {
+                self.buf.copy_from_slice(&data);
+                core::task::Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
 impl AsyncRead for MockStream {
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), AsyncReadError> {
-        let mut inner = self.inner.borrow_mut();
-
-        if inner.read_buf.len() < buf.len() {
-            drop(inner);
-            return core::future::pending().await;
-        }
-
-        for (i, b) in inner.read_buf.drain(..buf.len()).enumerate() {
-            buf[i] = b;
-        }
-
-        Ok(())
+    fn read_exact(&mut self, buf: &mut [u8]) -> impl core::future::Future<Output = Result<(), AsyncReadError>> {
+        MockReadExact { inner: self.inner.clone(), buf }
     }
 }
 
