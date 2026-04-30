@@ -1,4 +1,4 @@
-# polkadot-p2p-connector
+<img src="logo.svg" alt="polkadot-p2p-connector" width="720"/>
 
 This is a no-std compatible library for communicating with peers on the Polkadot network. Being no-std, it can be wired up to work in the browser, run natively using tokio, or other. It is focused on connecting to a single peer and interacting with it. The intention is that others can then decide how to handle multiple peer connections.
 
