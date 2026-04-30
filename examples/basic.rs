@@ -1,12 +1,12 @@
 use core::pin::Pin;
 use core::time::Duration;
 use parity_scale_codec::Encode;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
     SubscriptionProtocol, SubscriptionResponse,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// Provide a tokio-based [`AsyncRead`] implementation.
 struct TokioTcpReader(tokio::net::tcp::OwnedReadHalf);
@@ -48,10 +48,7 @@ impl PlatformT for TokioPlatform {
 async fn main() -> anyhow::Result<()> {
     // 1. We'll need to know the genesis hash of the chain we connect to
     let genesis_hex = "91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3";
-    let genesis: [u8; 32] = hex::decode(genesis_hex)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let genesis: [u8; 32] = hex::decode(genesis_hex).unwrap().try_into().unwrap();
 
     // 2. Configure the protocols that we support.
     let mut config: Configuration<TokioPlatform> = Configuration::new();
@@ -62,14 +59,12 @@ async fn main() -> anyhow::Result<()> {
         // The handshake we provide when subscribing.
         (
             // Role (2 == light client)
-            2u8,
-            // Best block number we know about
-            0,
-            // Best hash we know about
+            2u8, // Best block number we know about
+            0, // Best hash we know about
+            genesis, // Genesis hash forchain
             genesis,
-            // Genesis hash forchain
-            genesis,
-        ).encode(),
+        )
+            .encode(),
         // Is their handshake valid? Here just a basic check that the genesis hash lines up.
         move |remote_hs| remote_hs.len() >= 69 && remote_hs[37..69] == genesis,
     ));
@@ -77,9 +72,15 @@ async fn main() -> anyhow::Result<()> {
     // 3. Establish a TCP connection to a node.
     let tcp = TcpStream::connect(("polkadot-bootnode-0.polkadot.io", 30333)).await?;
     let (read_half, write_half) = tcp.into_split();
-    let mut conn = config.connect(TokioTcpReader(read_half), TokioTcpWriter(write_half)).await?;
+    let mut conn = config
+        .connect(TokioTcpReader(read_half), TokioTcpWriter(write_half))
+        .await?;
 
-    eprintln!("Connected! Us: {}, Them: {}", conn.our_id(), conn.their_id());
+    eprintln!(
+        "Connected! Us: {}, Them: {}",
+        conn.our_id(),
+        conn.their_id()
+    );
 
     // 3. Subscribe to our block announce protocol.
     conn.subscribe(block_announce_id)?;
@@ -88,7 +89,10 @@ async fn main() -> anyhow::Result<()> {
     while let Some(result) = conn.next().await {
         match result? {
             // Block announce notifications (id == block_announce_id):
-            Message::Notification { protocol_id: id, res } if id == block_announce_id => match res {
+            Message::Notification {
+                protocol_id: id,
+                res,
+            } if id == block_announce_id => match res {
                 SubscriptionResponse::Opened => {
                     eprintln!("Block announce subscription opened.");
                 }
@@ -99,12 +103,12 @@ async fn main() -> anyhow::Result<()> {
                     let block_type = match data.pop() {
                         Some(0) => "normal",
                         Some(1) => "best",
-                        _ => "unknown"
+                        _ => "unknown",
                     };
                     // The rest is the header.
                     let block_hash = hex::encode(&block_hash(&data));
                     println!("hash={block_hash} type={block_type}");
-                },
+                }
                 SubscriptionResponse::Closed => {
                     eprintln!("Block announce subscription closed.");
                     break;
@@ -115,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
             // We won't get any other messages.
-            o => eprintln!("Unexpected message: {o:?}")
+            o => eprintln!("Unexpected message: {o:?}"),
         }
     }
 
