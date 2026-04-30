@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::string::String;
 
 /// This should be implemented by the read half of some stream.
 pub trait AsyncRead {
@@ -19,6 +20,10 @@ impl AsyncReadError {
     pub fn new<E: core::error::Error + Send + Sync + 'static>(e: E) -> AsyncReadError {
         AsyncReadError(Box::new(e))
     }
+    /// Create an error relating to [`AsyncRead::read_exact`] from a string.
+    pub fn from_string(s: impl Into<String>) -> AsyncReadError {
+        AsyncReadError(Box::new(StringError(s.into())))
+    }
 }
 
 /// This should be implemented by the write half of some stream.
@@ -33,8 +38,22 @@ pub trait AsyncWrite {
 pub struct AsyncWriteError(Box<dyn core::error::Error + Send + Sync + 'static>);
 
 impl AsyncWriteError {
-    /// Create an error relating to [`AsyncStream::write_all`].
+    /// Create an error relating to [`AsyncWrite::write_all`].
     pub fn new<E: core::error::Error + Send + Sync + 'static>(e: E) -> AsyncWriteError {
         AsyncWriteError(Box::new(e))
     }
+    /// Create an error relating to [`AsyncWrite::write_all`] from a string.
+    pub fn from_string(s: impl Into<String>) -> AsyncWriteError {
+        AsyncWriteError(Box::new(StringError(s.into())))
+    }
 }
+
+#[derive(Debug)]
+struct StringError(String);
+
+impl core::fmt::Display for StringError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl core::error::Error for StringError {}

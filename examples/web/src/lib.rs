@@ -10,29 +10,14 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use parity_scale_codec::Encode;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
 use polkadot_p2p_connector::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
     SubscriptionProtocol, SubscriptionResponse,
 };
-
-// ---------------------------------------------------------------------------
-// Error helper (must be Send + Sync for AsyncReadError / AsyncWriteError)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct Oops(String);
-
-impl core::fmt::Display for Oops {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Oops {}
 
 // ---------------------------------------------------------------------------
 // WebSocket → AsyncRead / AsyncWrite bridge
@@ -53,7 +38,7 @@ impl AsyncRead for WsReader {
         core::future::poll_fn(|cx| {
             let mut st = self.0.borrow_mut();
             if let Some(err) = st.error.take() {
-                return Poll::Ready(Err(AsyncReadError::new(Oops(err))));
+                return Poll::Ready(Err(AsyncReadError::from_string(err)));
             }
             if st.buffer.len() >= buf.len() {
                 for b in buf.iter_mut() {
@@ -61,7 +46,7 @@ impl AsyncRead for WsReader {
                 }
                 Poll::Ready(Ok(()))
             } else if st.closed {
-                Poll::Ready(Err(AsyncReadError::new(Oops("connection closed".into()))))
+                Poll::Ready(Err(AsyncReadError::from_string("connection closed")))
             } else {
                 st.waker = Some(cx.waker().clone());
                 Poll::Pending
@@ -77,7 +62,7 @@ impl AsyncWrite for WsWriter {
     async fn write_all(&mut self, data: &[u8]) -> Result<(), AsyncWriteError> {
         self.0
             .send_with_u8_array(data)
-            .map_err(|e| AsyncWriteError::new(Oops(format!("{e:?}"))))
+            .map_err(|e| AsyncWriteError::from_string(format!("{e:?}")))
     }
 }
 
@@ -196,7 +181,9 @@ async fn run() -> Result<(), String> {
         let cb = Closure::once(move || {
             let mut st = s.borrow_mut();
             st.opened = true;
-            if let Some(w) = st.waker.take() { w.wake(); }
+            if let Some(w) = st.waker.take() {
+                w.wake();
+            }
         });
         ws.set_onopen(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
@@ -208,7 +195,9 @@ async fn run() -> Result<(), String> {
                 let arr = js_sys::Uint8Array::new(&buf);
                 let mut st = s.borrow_mut();
                 st.buffer.extend(arr.to_vec());
-                if let Some(w) = st.waker.take() { w.wake(); }
+                if let Some(w) = st.waker.take() {
+                    w.wake();
+                }
             }
         }) as Box<dyn FnMut(MessageEvent)>);
         ws.set_onmessage(Some(cb.as_ref().unchecked_ref()));
@@ -219,7 +208,9 @@ async fn run() -> Result<(), String> {
         let cb = Closure::wrap(Box::new(move |_: JsValue| {
             let mut st = s.borrow_mut();
             st.closed = true;
-            if let Some(w) = st.waker.take() { w.wake(); }
+            if let Some(w) = st.waker.take() {
+                w.wake();
+            }
         }) as Box<dyn FnMut(JsValue)>);
         ws.set_onclose(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
@@ -229,7 +220,9 @@ async fn run() -> Result<(), String> {
         let cb = Closure::wrap(Box::new(move |_: JsValue| {
             let mut st = s.borrow_mut();
             st.error = Some("WebSocket error".into());
-            if let Some(w) = st.waker.take() { w.wake(); }
+            if let Some(w) = st.waker.take() {
+                w.wake();
+            }
         }) as Box<dyn FnMut(JsValue)>);
         ws.set_onerror(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
@@ -271,10 +264,15 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    log(&format!("Connected! Us: {}, Them: {}", conn.our_id(), conn.their_id()));
+    log(&format!(
+        "Connected! Us: {}, Them: {}",
+        conn.our_id(),
+        conn.their_id()
+    ));
 
     // 4. Subscribe to block announcements.
-    conn.subscribe(block_announce_id).map_err(|e| e.to_string())?;
+    conn.subscribe(block_announce_id)
+        .map_err(|e| e.to_string())?;
 
     // 5. Stream blocks.
     while let Some(result) = conn.next().await {
