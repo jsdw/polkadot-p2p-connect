@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-#![doc = include_str!("../examples/basic/src/main.rs")]
+#![doc = include_str!("../examples/basic.rs")]
 //! ```
 
 #![cfg_attr(not(test), no_std)]

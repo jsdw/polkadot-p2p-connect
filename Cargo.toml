@@ -2,6 +2,10 @@
 name = "polkadot-p2p-connect"
 version = "0.1.0"
 edition = "2024"
+description = "Establish peer-to-peer connections with nodes on the Polkadot network"
+license = "MIT"
+repository = "https://github.com/jsdw/polkadot-p2p-client"
+include = ["src/**/*", "examples/basic/src/main.rs", "LICENSE"]
 
 [dependencies]
 snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-sha2"] }
@@ -12,3 +16,11 @@ tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
+
+# Used for our basic example:
+tokio = { version = "1", features = ["full"] }
+parity-scale-codec = { version = "3", features = ["derive"] }
+blake2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+anyhow = "1"
