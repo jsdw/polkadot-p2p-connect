@@ -2,9 +2,10 @@
 name = "p2p-client-example"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
-polkadot-p2p-connector = { path = "../../" }
+polkadot-p2p-connect = { path = "../../" }
 tokio = { version = "1", features = ["full"] }
 parity-scale-codec = { version = "3", features = ["derive"] }
 blake2 = "0.10"

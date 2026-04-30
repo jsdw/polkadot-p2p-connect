@@ -1,24 +1,27 @@
-use alloc::collections::{BTreeMap, vec_deque::VecDeque};
-use alloc::vec::Vec;
-use core::pin::pin;
+use crate::configuration::Configuration;
+use crate::error::{ConnectionError, StreamError};
+use crate::layers::yamux_multistream::CloseReason;
 use crate::layers::{
     multistream, noise, yamux,
     yamux_multistream::{self, YamuxStreamId},
 };
-use crate::configuration::Configuration;
-use crate::utils::peer_id;
-use crate::utils::timers::Timers;
-use crate::layers::yamux_multistream::CloseReason;
-use crate::platform::PlatformT;
-use crate::protocol::{RequestProtocol, RequestProtocolId, SubscriptionProtocol, SubscriptionProtocolId};
-use crate::error::{ConnectionError, StreamError};
-use crate::utils::async_stream::{AsyncRead, AsyncWrite};
-use crate::utils::peer_id::PeerId;
 use crate::platform;
+use crate::platform::PlatformT;
+use crate::protocol::{
+    RequestProtocol, RequestProtocolId, SubscriptionProtocol, SubscriptionProtocolId,
+};
+use crate::utils::async_stream::{AsyncRead, AsyncWrite};
+use crate::utils::peer_id;
+use crate::utils::peer_id::PeerId;
+use crate::utils::timers::Timers;
+use alloc::collections::{BTreeMap, vec_deque::VecDeque};
+use alloc::vec::Vec;
+use core::pin::pin;
 
 /// A connection to a single peer.
 pub struct Connection<R, W, Platform: PlatformT> {
-    yamux: yamux_multistream::YamuxMultistream<noise::NoiseReadStream<R>, noise::NoiseWriteStream<W>>,
+    yamux:
+        yamux_multistream::YamuxMultistream<noise::NoiseReadStream<R>, noise::NoiseWriteStream<W>>,
     remote_id: PeerId,
     our_id: PeerId,
     subscription_details: Vec<SubscriptionDetails>,
@@ -30,18 +33,17 @@ pub struct Connection<R, W, Platform: PlatformT> {
 }
 
 // SAFETY: `Connection` is not `Send` by default because some `Rc<RefCell<..>>`
-// Types exist internally. 
+// Types exist internally.
 //
-// We would have an issue if it were possible to get hold of any clones of `Rc`s and then send 
+// We would have an issue if it were possible to get hold of any clones of `Rc`s and then send
 // `Connection` to a different thread, leaving an Rc split across two threads. (This is an issue
-// because the Rc cannot atomically update its reference count, and the inner RefCell cannot 
+// because the Rc cannot atomically update its reference count, and the inner RefCell cannot
 // atomically set its borrowed flag or atomically share the inner data).
 //
-// HOWEVER, since no Rc/RefCell type is exposed in the public API of `Connection`, it is 
+// HOWEVER, since no Rc/RefCell type is exposed in the public API of `Connection`, it is
 // impossible to end up in a position where any Rc type is split across two threads: they are
 // all entirely contained in whichever thread the `Connection` is on.
-unsafe impl<R: Send, W: Send, Platform: Send + PlatformT> Send
-    for Connection<R, W, Platform> {}
+unsafe impl<R: Send, W: Send, Platform: Send + PlatformT> Send for Connection<R, W, Platform> {}
 
 enum RequestState {
     AwaitingProtocolConfirmation(Vec<u8>),
@@ -201,8 +203,10 @@ pub enum SubscriptionResponseError {
     MultistreamProtocolError,
 }
 
-impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Connection<R, W, Platform> {
-    pub (crate) async fn from_stream(
+impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT>
+    Connection<R, W, Platform>
+{
+    pub(crate) async fn from_stream(
         config: &Configuration<Platform>,
         mut reader: R,
         mut writer: W,
@@ -210,11 +214,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
     ) -> Result<Self, ConnectionError> {
         // Agree to use the noise protocol.
         {
-            let negotiate_fut = multistream::negotiate_dialer(
-                &mut reader, 
-                &mut writer, 
-                "/noise"
-            );
+            let negotiate_fut = multistream::negotiate_dialer(&mut reader, &mut writer, "/noise");
             let negotiate_fut = pin!(negotiate_fut);
             platform::timeout::<Platform, _, _>(config.multistream_timeout, negotiate_fut)
                 .await
@@ -234,9 +234,9 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         // Establish our encrypted noise session and find the remote Peer ID
         let handshake_fut = noise::handshake_dialer::<R, W, Platform>(
             reader,
-            writer, 
-            &identity, 
-            remote_peer_id.as_ref()
+            writer,
+            &identity,
+            remote_peer_id.as_ref(),
         );
         let handshake_fut = pin!(handshake_fut);
         let (mut noise_read_stream, mut noise_write_stream, remote_id) =
@@ -247,9 +247,9 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         // Agree to use the yamux protocol in this noise stream.
         {
             let yamux_fut = multistream::negotiate_dialer(
-                &mut noise_read_stream, 
+                &mut noise_read_stream,
                 &mut noise_write_stream,
-                "/yamux/1.0.0"
+                "/yamux/1.0.0",
             );
             let yamux_fut = pin!(yamux_fut);
             platform::timeout::<Platform, _, _>(config.multistream_timeout, yamux_fut)
@@ -311,12 +311,12 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         &self.remote_id
     }
 
-    /// Make a request to some protocol by providing the ID for that protocol and request body. 
-    /// 
+    /// Make a request to some protocol by providing the ID for that protocol and request body.
+    ///
     /// The required [`RequestProtocolId`] is handed back from calling [`Configuration::add_protocol()`]
     /// with a [`RequestProtocol`].
-    /// 
-    /// This returns a [`RequestId`]. We will eventually get back exactly one [`Message::Response`] 
+    ///
+    /// This returns a [`RequestId`]. We will eventually get back exactly one [`Message::Response`]
     /// with this [`RequestId`] from [`Self::next`].
     pub fn request(
         &mut self,
@@ -355,8 +355,8 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         Ok(RequestId(stream_id))
     }
 
-    /// Cancel a request. This makes a best-effort attempt to cancel an in-flight request when 
-    /// [`Self::next`] is called, and will lead to a [`RequestResponse::Cancelled`] message being 
+    /// Cancel a request. This makes a best-effort attempt to cancel an in-flight request when
+    /// [`Self::next`] is called, and will lead to a [`RequestResponse::Cancelled`] message being
     /// emitted for the given request ID.
     pub fn cancel_request(&mut self, id: RequestId) {
         let Some((protocol_id, _)) = self.inflight_requests.remove(&id.0) else {
@@ -373,19 +373,19 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         });
     }
 
-    /// Make a best effort to respond to an incoming request. If they close the stream (ie cancel the 
+    /// Make a best effort to respond to an incoming request. If they close the stream (ie cancel the
     /// request) before we manage to send our response then the response is silently dropped.
     pub fn respond(&mut self, id: ResponseId, response: &[u8]) {
         let _ = self.yamux.send_data(id.0, response);
         let _ = self.yamux.close_stream(id.0);
     }
 
-    /// Begin the subscription on one of our subscription protocols. 
-    /// 
+    /// Begin the subscription on one of our subscription protocols.
+    ///
     /// The required [`SubscriptionProtocolId`] is handed back from calling [`Configuration::add_protocol()`]
     /// with a [`SubscriptionProtocol`].
-    /// 
-    /// We will get back a stream of notification messages against the provided [`SubscriptionProtocolId`] 
+    ///
+    /// We will get back a stream of notification messages against the provided [`SubscriptionProtocolId`]
     /// when [`Self::next`] is called, until the subscription is closed, cancelled or returns an error.
     pub fn subscribe(
         &mut self,
@@ -415,7 +415,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         Ok(())
     }
 
-    /// Send a notification on a subscription. 
+    /// Send a notification on a subscription.
     ///
     /// The required [`SubscriptionProtocolId`] is handed back from calling [`Configuration::add_protocol()`]
     /// with a [`SubscriptionProtocol`].
@@ -463,7 +463,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
         }
     }
 
-    // Silently cancel a subscription (ie don't emit any messages). 
+    // Silently cancel a subscription (ie don't emit any messages).
     // Returns true if a subscription was cancelled, and false if not.
     fn cancel_subscription_silently(&mut self, id: SubscriptionProtocolId) -> bool {
         // Find the protocol
@@ -491,9 +491,9 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
 
     /// Drive this connection, concurrently writing and reading from our read and write streams
     /// and returning once the next message is available on the read stream.
-    /// 
+    ///
     /// # Cancel safety
-    /// 
+    ///
     /// This method is cancel safe and the resulting future can be safely dropped.
     pub async fn next(&mut self) -> Option<Result<Message, StreamError>> {
         if self.finished {
@@ -957,9 +957,9 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT> Conne
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::utils::async_stream::{AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError};
     use core::future::Future;
     use core::time::Duration;
-    use crate::utils::async_stream::{AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError};
 
     // Just assert at compile time that a Connection impls Send
     // so long as the Platform + AsyncRead + AsyncWrite impls do.
@@ -998,6 +998,4 @@ mod test {
         fn assert_send<T: Send>() {}
         assert_send::<Connection<TestStreamStub, TestStreamStub, TestPlatformStub>>();
     }
-
-
 }

@@ -3,7 +3,7 @@ use core::time::Duration;
 use parity_scale_codec::Encode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use polkadot_p2p_connector::{
+use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
     SubscriptionProtocol, SubscriptionResponse,
 };

@@ -1,8 +1,8 @@
+use crate::utils::debug_ignore::DebugIgnore;
+use crate::utils::opaque_id::OpaqueId;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::utils::opaque_id::OpaqueId;
-use crate::utils::debug_ignore::DebugIgnore;
 use core::time::Duration;
 use core::usize;
 
@@ -89,7 +89,7 @@ impl RequestProtocol {
 
 /// The ID for a single [`RequestProtocol`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequestProtocolId(pub (crate) usize);
+pub struct RequestProtocolId(pub(crate) usize);
 
 impl core::fmt::Display for RequestProtocolId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

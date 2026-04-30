@@ -1,9 +1,9 @@
 pub mod async_stream;
-pub mod read_write_join;
 pub mod debug_ignore;
 pub mod opaque_id;
 pub mod peer_id;
 pub mod protobuf;
+pub mod read_write_join;
 pub mod timers;
 pub mod varint;
 

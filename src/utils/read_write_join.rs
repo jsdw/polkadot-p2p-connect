@@ -1,23 +1,26 @@
+use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
-use alloc::boxed::Box;
 use core::task::Poll;
 
 /// This holds a future for reading and a future for writing, and
 /// returns any values read while progressing the writing future.
-/// 
+///
 /// This is used specifically when calling YamuxSession::next and is
 /// somewhat tailored to that use case.
 pub struct ReadWriteJoin<T, E> {
     write_fut: Option<Pin<Box<dyn Future<Output = Result<(), E>>>>>,
-    read_fut: Option<Pin<Box<dyn Future<Output = Result<T, E>>>>>
+    read_fut: Option<Pin<Box<dyn Future<Output = Result<T, E>>>>>,
 }
 
-impl <T, E> ReadWriteJoin<T, E> {
+impl<T, E> ReadWriteJoin<T, E> {
     /// Create a new, empty [`ReadWriteJoin`]. Use [`ReadWriteJoin::call`] to
     /// start executing a pair of futures.
     pub fn new() -> Self {
-        ReadWriteJoin { write_fut: None, read_fut: None }
+        ReadWriteJoin {
+            write_fut: None,
+            read_fut: None,
+        }
     }
 
     /// If you provide a function that returns a read future and a function that returns
@@ -25,9 +28,9 @@ impl <T, E> ReadWriteJoin<T, E> {
     /// read future returns a value. This returned future can be cancelled and will resume
     /// when this is called again.
     pub fn call<ReadFn, ReadFut, WriteFn, WriteFut>(
-        &mut self, 
-        read_fn: ReadFn, 
-        write_fn: WriteFn
+        &mut self,
+        read_fn: ReadFn,
+        write_fn: WriteFn,
     ) -> impl Future<Output = Result<T, E>>
     where
         ReadFn: Fn() -> ReadFut,
@@ -36,12 +39,11 @@ impl <T, E> ReadWriteJoin<T, E> {
         WriteFut: Future<Output = Result<(), E>> + 'static,
     {
         core::future::poll_fn(move |cx| {
-            let mut read_fut = self.read_fut.take().unwrap_or_else(|| {
-                Box::pin(read_fn())
-            });
-            let mut write_fut = self.write_fut.take().unwrap_or_else(|| {
-                Box::pin(write_fn())
-            });
+            let mut read_fut = self.read_fut.take().unwrap_or_else(|| Box::pin(read_fn()));
+            let mut write_fut = self
+                .write_fut
+                .take()
+                .unwrap_or_else(|| Box::pin(write_fn()));
 
             // Poll both futures concurrently.
             let read_poll = read_fut.as_mut().poll(cx);
@@ -52,15 +54,15 @@ impl <T, E> ReadWriteJoin<T, E> {
                 Poll::Pending => {
                     // Note the pending state and replace it.
                     write_pending = true;
-                },
+                }
                 Poll::Ready(Err(e)) => {
                     // Error; replace the other one and return the err. On the
-                    // next call we'll create a new write_fut and try again.                        
+                    // next call we'll create a new write_fut and try again.
                     self.read_fut = Some(read_fut);
-                    return Poll::Ready(Err(e))
-                },
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Ready(Ok(())) => {
-                    // Future finished so don't replace it. On the next 
+                    // Future finished so don't replace it. On the next
                     // loop we'll start a new write future going.
                 }
             }
@@ -83,19 +85,19 @@ impl <T, E> ReadWriteJoin<T, E> {
                     if write_pending {
                         self.write_fut = Some(write_fut);
                     }
-                    return Poll::Pending
-                },
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(e)) => {
                     if write_pending {
                         self.write_fut = Some(write_fut);
                     }
-                    return Poll::Ready(Err(e))
-                },
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Ready(Ok(val)) => {
                     if write_pending {
                         self.write_fut = Some(write_fut);
                     }
-                    return Poll::Ready(Ok(val))
+                    return Poll::Ready(Ok(val));
                 }
             }
         })

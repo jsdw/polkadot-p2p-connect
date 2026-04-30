@@ -357,7 +357,7 @@ dependencies = [
  "blake2",
  "hex",
  "parity-scale-codec",
- "polkadot-p2p-connector",
+ "polkadot-p2p-connect",
  "rand",
  "tokio",
 ]
@@ -420,7 +420,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "polkadot-p2p-connector"
+name = "polkadot-p2p-connect"
 version = "0.1.0"
 dependencies = [
  "bs58",

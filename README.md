@@ -1,6 +1,6 @@
 # polkadot-p2p-connector
 
-This is a no-std compatible library for communicating with peers on the Polkadot network. Being no-std, it can be wired up to work in the browser, run natively using tokio, or other. It is focused on connecting to a single peer and interacting with it.
+This is a no-std compatible library for communicating with peers on the Polkadot network. Being no-std, it can be wired up to work in the browser, run natively using tokio, or other. It is focused on connecting to a single peer and interacting with it. The intention is that others can then decide how to handle multiple peer connections.
 
 Here's an example of subscribing to block announcements from a peer:
 
@@ -10,7 +10,7 @@ use core::time::Duration;
 use parity_scale_codec::Encode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use polkadot_p2p_connector::{
+use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
     SubscriptionProtocol, SubscriptionResponse,
 };

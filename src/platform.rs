@@ -4,7 +4,7 @@ use core::pin::Pin;
 use core::task::Poll;
 use core::time::Duration;
 
-/// This trait provides any core features that we need in our [`crate::Connection`].
+/// This trait provides all of the platform-specific functionality that we need.
 pub trait PlatformT {
     /// The type returned from [`PlatformT::sleep()`]. This should
     /// be a future which resolves after the given sleep duration.

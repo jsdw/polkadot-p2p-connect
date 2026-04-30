@@ -96,7 +96,9 @@ pub enum Error {
     NoProtocolsGiven,
 }
 
-impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static> YamuxMultistream<R, W> {
+impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static>
+    YamuxMultistream<R, W>
+{
     pub fn new(yamux_session: YamuxSession<R, W>) -> Self {
         Self {
             inner: yamux_session,
@@ -217,9 +219,9 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
     /// Drive our yamux multistream machine, returning output messages as they come in
     /// and pushing inputs out.
-    /// 
+    ///
     /// # Cancel Safety
-    /// 
+    ///
     /// This function is cancel-safe.
     //
     // Dev note: The cancel-safety is easily verifiable because next() calls next_inner() which

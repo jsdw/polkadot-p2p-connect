@@ -2,12 +2,13 @@
 name = "p2p-client-web-example"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-polkadot-p2p-connector = { path = "../../" }
+polkadot-p2p-connect = { path = "../../" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

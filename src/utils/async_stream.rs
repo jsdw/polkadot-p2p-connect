@@ -29,7 +29,10 @@ impl AsyncReadError {
 /// This should be implemented by the write half of some stream.
 pub trait AsyncWrite {
     /// Write the entirity of the given bytes to the stream.
-    fn write_all(&mut self, data: &[u8]) -> impl core::future::Future<Output = Result<(), AsyncWriteError>>;
+    fn write_all(
+        &mut self,
+        data: &[u8],
+    ) -> impl core::future::Future<Output = Result<(), AsyncWriteError>>;
 }
 
 /// An error that can occur when calling [`AsyncWrite::write_all`].

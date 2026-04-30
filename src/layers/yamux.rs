@@ -3,14 +3,14 @@ pub mod header;
 #[cfg(not(test))]
 mod header;
 
-use crate::utils::async_stream;
+use crate::utils::async_stream::{AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError};
 use crate::utils::read_write_join::ReadWriteJoin;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec::Vec;
-use header::{FrameFlag, FrameType, GoAwayType, YamuxHeader};
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::cell::{Ref, RefCell};
+use header::{FrameFlag, FrameType, GoAwayType, YamuxHeader};
 
 // Re-export types in the API
 pub use header::{YamuxHeaderDecodeError, YamuxStreamId};
@@ -31,9 +31,9 @@ const MAX_FRAME_SIZE: usize = 512 * 1024; // 512kb
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("stream error receiving bytes: {0}")]
-    AsyncRead(#[from] async_stream::AsyncReadError),
+    AsyncRead(#[from] AsyncReadError),
     #[error("stream error sending bytes: {0}")]
-    AsyncWrite(#[from] async_stream::AsyncWriteError),
+    AsyncWrite(#[from] AsyncWriteError),
     #[error("cannot decode yamux header: {0}")]
     YamuxHeaderDecodeError(#[from] YamuxHeaderDecodeError),
     #[error("client tried to send message on stream ID {0}, which has been closed")]
@@ -54,7 +54,7 @@ pub enum Error {
     ServerUnknownError(u32),
 }
 
-/// This handles opening and closing multiple yamux streams on a single underlying [`AsyncStream`].
+/// This handles opening and closing multiple yamux streams given an [`AsyncRead`] and [`AsyncWrite`] stream.
 pub struct YamuxSession<R, W> {
     // AsyncReader and AsyncWriter:
     writer: Rc<RefCell<W>>,
@@ -100,19 +100,19 @@ pub enum OutputState {
     ClosedByRemote,
 }
 
-/// Our output data. Available from [`YamuxSession::data()`]. 
+/// Our output data. Available from [`YamuxSession::data()`].
 /// This derefs to a byte slice and can be treated as such.
 #[derive(Debug)]
 pub struct OutputData<'a> {
     buf: Ref<'a, Box<[u8; MAX_FRAME_SIZE]>>,
     len: usize,
 }
-impl <'a> PartialEq for OutputData<'a> {
+impl<'a> PartialEq for OutputData<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.len == other.len && &self.buf[self.len] == &other.buf[other.len]
     }
 }
-impl <'a> core::ops::Deref for OutputData<'a> {
+impl<'a> core::ops::Deref for OutputData<'a> {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
         &self.buf[0..self.len]
@@ -149,7 +149,7 @@ impl StreamState {
     }
 }
 
-impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static> YamuxSession<R, W> {
+impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
     /// Create a new, empty Yamux session, given some internal read/write transport.
     pub fn new(reader: R, writer: W) -> Self {
         Self {
@@ -163,13 +163,11 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
             inbound_buf: Rc::new(RefCell::new(Box::new([0u8; MAX_FRAME_SIZE]))),
             finished: false,
             // State held by read and write futures.
-            shared_state: Rc::new(RefCell::new(
-                SharedState { 
-                    streams: BTreeMap::new(), 
-                    write_buf: VecDeque::new(), 
-                    output_buf: None 
-                }
-            )),
+            shared_state: Rc::new(RefCell::new(SharedState {
+                streams: BTreeMap::new(),
+                write_buf: VecDeque::new(),
+                output_buf: None,
+            })),
             data_len: 0,
         }
     }
@@ -214,7 +212,7 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
             }
             Some(BufferedOutboundMessage::Accept)
             | Some(BufferedOutboundMessage::Open)
-            | Some(BufferedOutboundMessage::WindowUpdate(_)) 
+            | Some(BufferedOutboundMessage::WindowUpdate(_))
             | None => {
                 stream
                     .outbound_buf
@@ -270,7 +268,10 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
     /// data scheduled to be sent and will close the stream as soon as [`Self::next()`] is called. No further
     /// data will be seen for this stream.
     pub fn reset_stream_immediately(&mut self, stream_id: YamuxStreamId) {
-        Self::reset_stream_immediately_with_shared_state(&mut self.shared_state.borrow_mut(), stream_id)
+        Self::reset_stream_immediately_with_shared_state(
+            &mut self.shared_state.borrow_mut(),
+            stream_id,
+        )
     }
 
     /// Retrieve the output data. If the output from calling [`Self::next()`] contained [`OutputState::Data`]
@@ -279,11 +280,14 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
         let buf = self.inbound_buf.borrow();
         OutputData {
             buf,
-            len: self.data_len
+            len: self.data_len,
         }
     }
 
-    fn reset_stream_immediately_with_shared_state(shared_state: &mut SharedState, stream_id: YamuxStreamId) {
+    fn reset_stream_immediately_with_shared_state(
+        shared_state: &mut SharedState,
+        stream_id: YamuxStreamId,
+    ) {
         let Some(stream) = shared_state.streams.get_mut(&stream_id) else {
             // If we can't find the stream, it's been closed anyway.
             return;
@@ -332,30 +336,35 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
     // It's easier to return Result<Option> internally, but externally we want to look like
     // a stream and return Option<Result>, hence next vs next_inner.
-    async fn next_inner(&mut self) -> Result<Option<Output>, Error> {    
-        self.read_write_join.call(
-            || {
-                let reader = self.reader.clone();
-                let read_buf = self.inbound_buf.clone();
-                let reader_state = self.shared_state.clone();
-                async move {
-                    Self::read_next(&mut reader.borrow_mut(), &reader_state, &mut read_buf.borrow_mut()).await
-                }
-            },
-            || {
-                let writer = self.writer.clone();
-                let writer_state = self.shared_state.clone();
-                async move {
-                    Self::write_next(&mut writer.borrow_mut(), &writer_state).await
-                }
-            },
-        ).await
+    async fn next_inner(&mut self) -> Result<Option<Output>, Error> {
+        self.read_write_join
+            .call(
+                || {
+                    let reader = self.reader.clone();
+                    let read_buf = self.inbound_buf.clone();
+                    let reader_state = self.shared_state.clone();
+                    async move {
+                        Self::read_next(
+                            &mut reader.borrow_mut(),
+                            &reader_state,
+                            &mut read_buf.borrow_mut(),
+                        )
+                        .await
+                    }
+                },
+                || {
+                    let writer = self.writer.clone();
+                    let writer_state = self.shared_state.clone();
+                    async move { Self::write_next(&mut writer.borrow_mut(), &writer_state).await }
+                },
+            )
+            .await
     }
 
     async fn read_next(
         reader: &mut R,
         shared_state: &RefCell<SharedState>,
-        buf: &mut [u8; MAX_FRAME_SIZE]
+        buf: &mut [u8; MAX_FRAME_SIZE],
     ) -> Result<Option<Output>, Error> {
         loop {
             // Check if a buffered output is waiting (e.g. Data queued after OpenedByRemote).
@@ -394,7 +403,9 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
                     // Get hold of the stream details, opening a new stream if we need to.
                     let (stream, is_new) = if flags.is_open_new_stream() {
-                        let Some(stream) = Self::negotiate_new_stream_request(&hdr, &mut shared_state)? else {
+                        let Some(stream) =
+                            Self::negotiate_new_stream_request(&hdr, &mut shared_state)?
+                        else {
                             continue;
                         };
                         (stream, true)
@@ -422,43 +433,65 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                         // If the stream is RST then we remove it immediately; they won't send any
                         // more but they also won't accept any more from us. We still must return any final data.
                         shared_state.streams.remove(&stream_id);
-                        shared_state.output_buf = Some(Output { stream_id, state: OutputState::ClosedByRemote });
+                        shared_state.output_buf = Some(Output {
+                            stream_id,
+                            state: OutputState::ClosedByRemote,
+                        });
                     } else if flags.contains(FrameFlag::Fin) {
                         // If the stream is FIN then we mark that the remote won't send more.
                         // Deliver the data first, then ClosedByRemote on the next call.
                         stream.remote_fin = true;
-                        shared_state.output_buf = Some(Output { stream_id, state: OutputState::ClosedByRemote });
+                        shared_state.output_buf = Some(Output {
+                            stream_id,
+                            state: OutputState::ClosedByRemote,
+                        });
                     } else if stream.recv_window < MAX_FRAME_SIZE / 2 {
                         // We don't care if they send more bytes than our window size, but we do ensure the window
                         // size is always at least MAX_FRAME_SIZE and so if their window size gets to 1/2 then
                         // bump it up so that they keep sending.
                         let delta = MAX_FRAME_SIZE - stream.recv_window;
                         stream.recv_window += delta;
-                        stream.outbound_buf.push_back(BufferedOutboundMessage::WindowUpdate(delta as u32));
+                        stream
+                            .outbound_buf
+                            .push_back(BufferedOutboundMessage::WindowUpdate(delta as u32));
                     }
 
                     if data_len == 0 && is_new {
                         // No data to send but new stream, so just send opened message
-                        return Ok(Some(Output { stream_id, state: OutputState::OpenedByRemote }));
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::OpenedByRemote,
+                        }));
                     } else if data_len == 0 && !is_new {
                         // No data to send, and not a new stream, so nothing to send.
                         continue;
                     } else if data_len > 0 && is_new {
                         // Data to send and a new stream, so send opened and then data next
-                        shared_state.output_buf = Some(Output { stream_id, state: OutputState::Data(data_len) });
-                        return Ok(Some(Output { stream_id, state: OutputState::OpenedByRemote }));
+                        shared_state.output_buf = Some(Output {
+                            stream_id,
+                            state: OutputState::Data(data_len),
+                        });
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::OpenedByRemote,
+                        }));
                     } else if data_len > 0 && !is_new {
                         // Data to send and not new stream so just send out the data.
-                        return Ok(Some(Output { stream_id, state: OutputState::Data(data_len) }));
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::Data(data_len),
+                        }));
                     }
                 }
                 FrameType::WindowUpdate => {
                     tracing::debug!(target: LOG_TARGET, "received WINDOW UPDATE on stream {stream_id} (flags: {flags}, delta: {length})");
                     let mut shared_state = shared_state.borrow_mut();
-                    
+
                     // Get hold of the stream details, opening a new stream if we need to.
                     let (stream, is_new) = if flags.is_open_new_stream() {
-                        let Some(stream) = Self::negotiate_new_stream_request(&hdr, &mut shared_state)? else {
+                        let Some(stream) =
+                            Self::negotiate_new_stream_request(&hdr, &mut shared_state)?
+                        else {
                             continue;
                         };
                         (stream, true)
@@ -480,17 +513,26 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                         // If the stream is RST then we remove all knowledge of it as it is closed.
                         // It doesn't matter what the window update header says.
                         shared_state.streams.remove(&stream_id);
-                        return Ok(Some(Output { stream_id, state: OutputState::ClosedByRemote }));
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::ClosedByRemote,
+                        }));
                     } else if flags.contains(FrameFlag::Fin) {
                         // If FIN was sent then they won't send more so we acknowledge,
                         // but we'll still accept window updates and can send to them.
                         // If the stream is SYN then it's just been opened; tell the user this.
                         stream.remote_fin = true;
-                        return Ok(Some(Output { stream_id, state: OutputState::ClosedByRemote }));
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::ClosedByRemote,
+                        }));
                     } else if is_new {
                         // This is a new stream, so emit a message that it is opened. New streams
                         // will never conflict with RST/FIN flags.
-                        return Ok(Some(Output { stream_id, state: OutputState::OpenedByRemote }));
+                        return Ok(Some(Output {
+                            stream_id,
+                            state: OutputState::OpenedByRemote,
+                        }));
                     }
                 }
                 FrameType::Ping => {
@@ -500,13 +542,18 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                     // Only stream 0 (session stream) should send this. If another stream
                     // sends this then abort it as it did something wrong.
                     if !stream_id.is_session_id() {
-                        Self::reset_stream_immediately_with_shared_state(&mut shared_state, stream_id);
+                        Self::reset_stream_immediately_with_shared_state(
+                            &mut shared_state,
+                            stream_id,
+                        );
                         continue;
                     }
 
                     // Return a pong to the ping.
                     tracing::debug!(target: LOG_TARGET, "sending PONG on stream {stream_id}");
-                    shared_state.write_buf.extend(&YamuxHeader::pong(stream_id, hdr.length).encode());
+                    shared_state
+                        .write_buf
+                        .extend(&YamuxHeader::pong(stream_id, hdr.length).encode());
                 }
                 FrameType::GoAway => {
                     tracing::debug!(target: LOG_TARGET, "received GO AWAY on stream {stream_id} (flags: {flags})");
@@ -515,7 +562,10 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                     // Only stream 0 (session stream) should send this. If another stream
                     // sends this then abort it as it did something wrong.
                     if !stream_id.is_session_id() {
-                        Self::reset_stream_immediately_with_shared_state(&mut shared_state, stream_id);
+                        Self::reset_stream_immediately_with_shared_state(
+                            &mut shared_state,
+                            stream_id,
+                        );
                         continue;
                     }
 
@@ -541,10 +591,7 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
     }
 
     /// Send as much of our buffered data as we can, draining any write buffers.
-    async fn write_next(
-        writer: &mut W, 
-        shared_state: &RefCell<SharedState>
-    ) -> Result<(), Error> {
+    async fn write_next(writer: &mut W, shared_state: &RefCell<SharedState>) -> Result<(), Error> {
         // Drain the global write buf first. This is for things like PONGs or
         // resetting streams we haven't accepted.
         let global_write_buf = core::mem::take(&mut shared_state.borrow_mut().write_buf);
@@ -564,7 +611,7 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
         for (&stream_id, stream) in streams.iter_mut() {
             let Some(msg) = stream.outbound_buf.pop_front() else {
-                continue
+                continue;
             };
 
             match msg {
@@ -579,7 +626,7 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                 BufferedOutboundMessage::Close => {
                     tracing::debug!(target: LOG_TARGET, "closing stream {stream_id} (FIN)");
                     bytes_to_write.extend(YamuxHeader::close_stream(stream_id).encode());
-    
+
                     // Note: In theory we are sending FIN here which allows the other side
                     // to continue sending data, but in practice we are happy to close it
                     // entirely because at a higher level, we ignore any messages given back
@@ -594,11 +641,11 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                 BufferedOutboundMessage::WindowUpdate(len) => {
                     tracing::debug!(target: LOG_TARGET, "window update for stream {stream_id} ({len} bytes)");
                     bytes_to_write.extend(YamuxHeader::window_update(stream_id, len).encode());
-                },
+                }
                 BufferedOutboundMessage::Data(mut outbound_data) => {
                     let bytes_to_send = usize::min(stream.send_window, outbound_data.len());
                     tracing::debug!(target: LOG_TARGET, "sending {bytes_to_send} DATA bytes on stream {stream_id}");
-    
+
                     // If we can't send anything on this stream, put the message back on the queue and break
                     // to stop pulling items from this streams queue. We need a window update before we can
                     // send more data on this stream.
@@ -608,26 +655,27 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
                             .push_back(BufferedOutboundMessage::Data(outbound_data));
                         continue;
                     }
-    
+
                     // VecDeque is two slices internally, so we work out how many bytes of
                     // each slice we need to send to satisfy the above.
                     let (a, b) = outbound_data.as_slices();
                     let a_len = usize::min(bytes_to_send, a.len());
                     let b_len = bytes_to_send.saturating_sub(a.len());
-    
+
                     // Send the appropriate header and then the corresponding bytes. Because
                     // we have two slices above, we break this into two sends if necessary.
                     bytes_to_write.extend(YamuxHeader::send_data(stream_id, a_len as u32).encode());
                     bytes_to_write.extend(&a[..a_len]);
                     if b_len > 0 {
-                        bytes_to_write.extend(YamuxHeader::send_data(stream_id, b_len as u32).encode());
+                        bytes_to_write
+                            .extend(YamuxHeader::send_data(stream_id, b_len as u32).encode());
                         bytes_to_write.extend(&b[..b_len]);
                     }
-    
+
                     // Decrement the send window. When this runs out we'll be forced to
                     // wait for a window update from them before we can send more.
                     stream.send_window = stream.send_window.saturating_sub(bytes_to_send);
-    
+
                     // If we didn't send all of the bytes, then drain what we did send and put
                     // the message back onto the queue to be tried again later.
                     if bytes_to_send != outbound_data.len() {
@@ -677,7 +725,9 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 
         // if they try to open too many streams, reject it but all good protocol wise.
         if shared_state.streams.len() >= MAX_STREAMS {
-            shared_state.write_buf.extend(&YamuxHeader::reset_stream(stream_id).encode());
+            shared_state
+                .write_buf
+                .extend(&YamuxHeader::reset_stream(stream_id).encode());
             tracing::debug!(target: LOG_TARGET, "rejecting new incoming stream {stream_id}: too many open streams");
             return Ok(None);
         }
@@ -695,7 +745,9 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
             .entry(stream_id)
             .or_insert_with(StreamState::new);
 
-        stream.outbound_buf.push_back(BufferedOutboundMessage::Accept);
+        stream
+            .outbound_buf
+            .push_back(BufferedOutboundMessage::Accept);
 
         Ok(Some(stream))
     }
@@ -705,13 +757,14 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
 mod test {
     use super::*;
     use crate::{
-        utils::async_stream::{AsyncRead, AsyncWrite},
         layers::yamux::header::FrameFlags,
         utils::testing::{MockStream, MockStreamHandle, block_on},
     };
 
     /// Poll the [`YamuxSession`], expecting it to return an [`Output`].
-    fn next_expecting_output<R: AsyncRead + 'static, W: AsyncWrite + 'static>(yamux: &mut YamuxSession<R, W>) -> Output {
+    fn next_expecting_output<R: AsyncRead + 'static, W: AsyncWrite + 'static>(
+        yamux: &mut YamuxSession<R, W>,
+    ) -> Output {
         block_on(yamux.next())
             .expect("expecting Ready, not Pending, from YamuxSession::next()")
             .expect("output should not be None")
@@ -1459,7 +1512,10 @@ mod test {
         // bytes which are not yet available.  block_on drops the future on Pending,
         // simulating a cancellation.
         let pending = block_on(yamux.next());
-        assert!(pending.is_none(), "expected Pending: data bytes not yet in buffer");
+        assert!(
+            pending.is_none(),
+            "expected Pending: data bytes not yet in buffer"
+        );
 
         // The header bytes are now gone from the read buffer.  If next() were not
         // cancel-safe a fresh read future would misinterpret the following data bytes

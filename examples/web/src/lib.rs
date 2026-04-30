@@ -14,7 +14,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
-use polkadot_p2p_connector::{
+use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
     SubscriptionProtocol, SubscriptionResponse,
 };

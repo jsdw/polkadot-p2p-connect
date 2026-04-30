@@ -1,22 +1,22 @@
-use core::time::Duration;
-use core::marker::PhantomData;
-use alloc::vec::Vec;
-use crate::protocol::{AnyProtocol, Protocol};
-use crate::platform::PlatformT;
-use crate::utils::opaque_id::OpaqueId;
-use crate::utils::async_stream::{AsyncRead, AsyncWrite};
-use crate::utils::peer_id::PeerId;
 use crate::connection::Connection;
 use crate::error::ConnectionError;
+use crate::platform::PlatformT;
+use crate::protocol::{AnyProtocol, Protocol};
+use crate::utils::async_stream::{AsyncRead, AsyncWrite};
+use crate::utils::opaque_id::OpaqueId;
+use crate::utils::peer_id::PeerId;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+use core::time::Duration;
 
 /// Configuration for connections.
 #[derive(Debug, Clone)]
 pub struct Configuration<Platform> {
-    pub (crate) identity_secret: Option<[u8; 32]>,
-    pub (crate) noise_timeout: Duration,
-    pub (crate) multistream_timeout: Duration,
-    pub (crate) marker: PhantomData<(Platform,)>,
-    pub (crate) protocols: Vec<(OpaqueId, AnyProtocol)>,
+    pub(crate) identity_secret: Option<[u8; 32]>,
+    pub(crate) noise_timeout: Duration,
+    pub(crate) multistream_timeout: Duration,
+    pub(crate) marker: PhantomData<(Platform,)>,
+    pub(crate) protocols: Vec<(OpaqueId, AnyProtocol)>,
 }
 
 impl<Platform: PlatformT> Configuration<Platform> {
@@ -31,7 +31,7 @@ impl<Platform: PlatformT> Configuration<Platform> {
         }
     }
 
-    /// Add a [`crate::protocol::RequestProtocol`] or a [`crate::protocol::SubscriptionProtocol`], 
+    /// Add a [`crate::protocol::RequestProtocol`] or a [`crate::protocol::SubscriptionProtocol`],
     /// returning a unique ID for this protocol that can be used to interact with it.
     pub fn add_protocol<P: Protocol>(&mut self, protocol: P) -> P::Id {
         let next_id = OpaqueId::new();
@@ -61,9 +61,9 @@ impl<Platform: PlatformT> Configuration<Platform> {
     /// Connect to a peer given some read/write byte stream that has already been established with it.
     /// If we know the expected peer ID then we can use [`Self::connect_to_peer`] to provide this ID,
     /// which will then check that it is correct.
-    /// 
+    ///
     /// # Cancel safety
-    /// 
+    ///
     /// This method is not cancel safe.
     pub async fn connect<R: AsyncRead + 'static, W: AsyncWrite + 'static>(
         &self,
@@ -75,9 +75,9 @@ impl<Platform: PlatformT> Configuration<Platform> {
 
     /// Connect to a peer given some read/write byte stream that has already been established with it,
     /// and the expected identity of the peer. If the identity does not match then the connection will be rejected.
-    /// 
+    ///
     /// # Cancel safety
-    /// 
+    ///
     /// This method is not cancel safe.
     pub async fn connect_to_peer<R: AsyncRead + 'static, W: AsyncWrite + 'static>(
         &self,

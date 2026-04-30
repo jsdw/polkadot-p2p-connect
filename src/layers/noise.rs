@@ -4,9 +4,9 @@ use crate::utils::peer_id::{Identity, PeerId, verify_ed25519};
 use crate::utils::protobuf;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use alloc::rc::Rc;
 
 const NOISE_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const STATIC_KEY_DOMAIN: &[u8] = b"noise-libp2p-static-key:";
@@ -490,7 +490,10 @@ mod test {
 
     /// Perform a Noise XX handshake entirely in memory and return a
     /// (initiator, responder) pair of `TransportState`s ready for data.
-    fn make_transport_pair() -> (Rc<RefCell<snow::TransportState>>, Rc<RefCell<snow::TransportState>>) {
+    fn make_transport_pair() -> (
+        Rc<RefCell<snow::TransportState>>,
+        Rc<RefCell<snow::TransportState>>,
+    ) {
         let params: snow::params::NoiseParams = NOISE_PARAMS.parse().unwrap();
 
         let builder_i = snow::Builder::with_resolver(params.clone(), Box::new(test_resolver()));

@@ -32,7 +32,11 @@ pub enum Error {
 }
 
 /// Dialer-side multistream-select: propose a single protocol.
-pub async fn negotiate_dialer(reader: &mut impl AsyncRead, writer: &mut impl AsyncWrite, protocol: &str) -> Result<(), Error> {
+pub async fn negotiate_dialer(
+    reader: &mut impl AsyncRead,
+    writer: &mut impl AsyncWrite,
+    protocol: &str,
+) -> Result<(), Error> {
     // Send header + proposal in one write (common optimisation)
     let mut msgs = Vec::new();
     encode_msg(MULTISTREAM_HEADER, &mut msgs);

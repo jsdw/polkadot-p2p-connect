@@ -58,7 +58,10 @@ struct MockReadExact<'a> {
 impl<'a> core::future::Future for MockReadExact<'a> {
     type Output = Result<(), AsyncReadError>;
 
-    fn poll(mut self: core::pin::Pin<&mut Self>, _cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
         let needed = self.buf.len();
         // Drain into a temporary vec first so that we can drop the `RefMut`
         // borrow before writing into `self.buf` (accessing two fields through
@@ -82,8 +85,14 @@ impl<'a> core::future::Future for MockReadExact<'a> {
 }
 
 impl AsyncRead for MockStream {
-    fn read_exact(&mut self, buf: &mut [u8]) -> impl core::future::Future<Output = Result<(), AsyncReadError>> {
-        MockReadExact { inner: self.inner.clone(), buf }
+    fn read_exact(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl core::future::Future<Output = Result<(), AsyncReadError>> {
+        MockReadExact {
+            inner: self.inner.clone(),
+            buf,
+        }
     }
 }
 
