@@ -174,6 +174,8 @@ The trick here is that `.next()` is cancel-safe, allowing the future that it ret
 An as example; this sort of thing will work fine:
 
 ```rust
+let mut conn: Connection<..> = // ...;
+
 let mut i = tokio::time::interval(core::time::Duration::from_millis(100))
 loop {
     tokio::select! {
