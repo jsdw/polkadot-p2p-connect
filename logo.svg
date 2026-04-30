@@ -9,5 +9,5 @@
     <path d="M209.058 172.038C199.766 192.192 196.547 210.553 201.89 213.01C207.233 215.468 219.114 201.124 228.406 180.969C237.731 160.815 240.917 142.453 235.607 139.996C235.209 139.797 234.778 139.731 234.28 139.731C228.472 139.731 217.654 153.411 209.058 172.038Z" fill="#E6007A"/>
   </g>
   <!-- Library name -->
-  <text x="72" y="39" font-family="Georgia, 'Times New Roman', Times, serif" font-size="30" font-weight="600" fill="#E6007A" letter-spacing="-0.5">polkadot-p2p-connector</text>
+  <text x="72" y="39" font-family="Georgia, 'Times New Roman', Times, serif" font-size="30" font-weight="600" fill="#E6007A" letter-spacing="-0.5">polkadot-p2p-connect</text>
 </svg>

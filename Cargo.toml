@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Establish peer-to-peer connections with nodes on the Polkadot network"
 license = "MIT"
-repository = "https://github.com/jsdw/polkadot-p2p-client"
-include = ["src/**/*", "examples/basic/src/main.rs", "LICENSE"]
+repository = "https://github.com/paritytech/polkadot-p2p-connect"
+include = ["src/**/*", "examples/basic.rs", "LICENSE"]
 
 [dependencies]
 snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-sha2"] }
