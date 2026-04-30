@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
         // The handshake we provide when subscribing.
         (
             // Role (2 == light client)
-            2u8, // Best block number we know about
-            0, // Best hash we know about
+            2u8,     // Best block number we know about
+            0,       // Best hash we know about
             genesis, // Genesis hash forchain
             genesis,
         )
