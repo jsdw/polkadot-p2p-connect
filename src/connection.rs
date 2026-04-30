@@ -94,6 +94,7 @@ impl SubscriptionStreamState {
 /// Some message received from the connected peer. We'll get back a single [`Message::Response`] for any
 /// [`Connection::request()`] that we call, and a stream of [`Message::Notification`]s for any
 /// [`Connection::subscribe()`] subscription that we create.
+#[derive(Debug, Clone)]
 pub enum Message {
     /// An incoming request. Respond with [`Connection::respond()`].
     Request {
@@ -127,6 +128,7 @@ pub enum Message {
 pub struct ResponseId(YamuxStreamId);
 
 /// An incoming request.
+#[derive(Debug, Clone)]
 pub enum Request {
     /// The incoming request payload.
     Value(Vec<u8>),
@@ -143,6 +145,7 @@ pub struct RequestId(YamuxStreamId);
 
 /// A response to some [`Connection::request()`], found in a [`Message::Response`].
 /// We receive back exactly response 1 per request.
+#[derive(Debug, Clone)]
 pub enum RequestResponse {
     /// The response value.
     Value(Vec<u8>),
@@ -153,7 +156,7 @@ pub enum RequestResponse {
 }
 
 /// An error making a request.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum RequestResponseError {
     #[error("the request timed out waiting for a response")]
@@ -169,6 +172,7 @@ pub enum RequestResponseError {
 }
 
 /// A response to some [`Connection::subscribe()`], found in a [`Message::Notification`].
+#[derive(Debug, Clone)]
 pub enum SubscriptionResponse {
     /// the subscription stream has been opened and is ready for sending and receiving.
     /// Sending can now be done using [`Connection::send_notification()`].
@@ -182,7 +186,7 @@ pub enum SubscriptionResponse {
 }
 
 /// An error subscribing or receiving subscription responses.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum SubscriptionResponseError {
     #[error("the remote rejected the protocol we handed it")]

@@ -1,5 +1,5 @@
 [package]
-name = "polkadot-p2p-client"
+name = "polkadot-p2p-connector"
 version = "0.1.0"
 edition = "2024"
 

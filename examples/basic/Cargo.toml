@@ -1,0 +1,13 @@
+[package]
+name = "p2p-client-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polkadot-p2p-connector = { path = "../../" }
+tokio = { version = "1", features = ["full"] }
+parity-scale-codec = { version = "3", features = ["derive"] }
+blake2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+anyhow = "1"

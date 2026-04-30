@@ -554,9 +554,8 @@ impl<R: async_stream::AsyncRead + 'static, W: async_stream::AsyncWrite + 'static
             writer.write_all(b).await?;
         }
 
-        // Find and handle the next stream specific message we find on each open stream.
-        // This ensures that we make progress on each stream inbetween progressing any 
-        // global messages.
+        // Find and handle all of our stream-specific messages. Make sure not to hold
+        // shared_state across any await points.
         let mut bytes_to_write = Vec::new();
         let mut streams_to_remove = Vec::new();
 
