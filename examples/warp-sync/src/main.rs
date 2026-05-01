@@ -6,8 +6,7 @@ use core::time::Duration;
 use parity_scale_codec::Encode;
 use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
-    RequestProtocol, RequestResponse, SubscriptionProtocol,
-    SubscriptionResponse,
+    RequestProtocol, RequestResponse, SubscriptionProtocol, SubscriptionResponse,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -95,21 +94,32 @@ async fn main() -> anyhow::Result<()> {
         finalized_hash: GENESIS_HASH,
     };
 
+    let bootnodes = [
+        ("polkadot-bootnode-1.polkadot.io", 30333),
+        ("polkadot-bootnode-0.polkadot.io", 30333),
+        ("boot-node.helikon.io", 7070),
+    ];
+    let bootnode_n = 0;
+
     // loop this bit in case we get rate limited and need to retry the connection.
     loop {
+        // Round robin between bootnodes to try and avoid rate limits etc.
+        let bootnode_addr = bootnodes[bootnode_n % bootnodes.len()];
+
         // Connect to a Polkadot bootnode via TCP.
-        let tcp = TcpStream::connect(("polkadot-bootnode-0.polkadot.io", 30333)).await?;
+        let tcp = TcpStream::connect(bootnode_addr).await?;
         let (read_half, write_half) = tcp.into_split();
         let mut conn = config
             .connect(TokioTcpReader(read_half), TokioTcpWriter(write_half))
             .await?;
-    
+
         eprintln!(
-            "Connected! Us: {}, Them: {}",
+            "Connected to {}! Us: {}, Them: {}",
+            bootnode_addr.0,
             conn.our_id(),
             conn.their_id()
         );
-    
+
         // Subscribe to block announces (needed for the peer to maintain the connection).
         conn.subscribe(block_announce_id)?;
 
@@ -123,7 +133,10 @@ async fn main() -> anyhow::Result<()> {
                     protocol_id,
                     res: SubscriptionResponse::Opened,
                 } if protocol_id == block_announce_id => {
-                    eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
+                    eprintln!(
+                        "Requesting warp sync from #{}",
+                        grandpa_state.finalized_number
+                    );
                     conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
                 }
                 Message::Notification {
@@ -138,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 } if protocol_id == block_announce_id => {
                     anyhow::bail!("Block announce subscription error: {e}");
                 }
-    
+
                 // Warp sync responses:
                 Message::Response {
                     protocol_id,
@@ -148,14 +161,14 @@ async fn main() -> anyhow::Result<()> {
                     let is_finished = grandpa_state
                         .update_with_warp_sync_response(&bytes)
                         .map_err(|e| anyhow::anyhow!(e))?;
-    
+
                     eprintln!(
                         "  Warp sync progress: block #{}, set_id={}, {} authorities",
                         grandpa_state.finalized_number,
                         grandpa_state.set_id,
                         grandpa_state.authorities.len(),
                     );
-    
+
                     if is_finished {
                         eprintln!(
                             "Warp sync complete! Finalized block #{}, hash=0x{}",
@@ -164,9 +177,12 @@ async fn main() -> anyhow::Result<()> {
                         );
                         return Ok(());
                     }
-    
+
                     // Not finished yet; request the next chunk from our new finalized hash.
-                    eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
+                    eprintln!(
+                        "Requesting warp sync from #{}",
+                        grandpa_state.finalized_number
+                    );
                     conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
                 }
                 Message::Response {
@@ -174,17 +190,17 @@ async fn main() -> anyhow::Result<()> {
                     res: RequestResponse::Error(e),
                     ..
                 } if protocol_id == warp_sync_id => {
-                    eprintln!("Error requesting warp sync data (will retry after 30s): {e}");
+                    eprintln!("Error requesting warp sync data (will retry after 10s): {e}");
                     // Break the while loop to retry.
-                    break
+                    break;
                 }
-    
+
                 // Ignore all other messages (block announce values, etc).
                 _ => {}
             }
         }
 
-        // If we get here we'll retry with a new connection.
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        // If we get here we'll just naively retry after 10s with a new connection.
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }

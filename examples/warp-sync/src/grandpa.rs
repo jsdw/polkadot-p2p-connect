@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use crate::polkadot::{Hash, BlockHash, BlockHeader, BlockDigestItem};
+use crate::polkadot::{BlockDigestItem, BlockHash, BlockHeader, Hash};
 use parity_scale_codec::{Decode, Encode};
+use std::collections::{HashMap, HashSet};
 
 /// The current GRANDPA state that we are aware of.
 pub struct GrandpaState {
@@ -20,13 +20,13 @@ pub type AuthorityId = [u8; 32];
 
 impl GrandpaState {
     /// Update our GRANDPA state given some warp sync response bytes from a peer. Returns
-    /// an error if something went wrong during the updates (while still updating as much 
+    /// an error if something went wrong during the updates (while still updating as much
     /// as possible). If things go OK, returns a boolean indicating whether we are "done"
-    /// (if false, then we should request another warp sync response from the latest finalized 
+    /// (if false, then we should request another warp sync response from the latest finalized
     /// block hash to update further).
     pub fn update_with_warp_sync_response(
-        &mut self, 
-        response_bytes: &[u8]
+        &mut self,
+        response_bytes: &[u8],
     ) -> Result<bool, String> {
         let response = wire_format::WarpSyncResponse::decode(&mut &response_bytes[..])
             .map_err(|e| format!("failed to decode warp sync response: {}", e))?;
@@ -50,25 +50,24 @@ impl GrandpaState {
         let header = &fragment.header;
         let justification = &fragment.justification;
 
-        // Each fragment should advance to a higher header number. 
+        // Each fragment should advance to a higher header number.
         // Reject any attempts to revert to a lower one.
         if header.number <= self.finalized_number {
             return Err(format!(
                 "fragment block #{} does not advance finality (current #{})",
-                header.number,
-                self.finalized_number,
+                header.number, self.finalized_number,
             ));
         }
 
         // The justification target hash must reference the header
-        // we we given, else an attacker could provide a different 
+        // we we given, else an attacker could provide a different
         // header containing invalid details (eg invalid authority set change)
         let header_hash = header.hash();
         if justification.target_hash != header_hash {
             return Err(format!(
                 "justification target_hash ({}) does not match header hash ({})",
-                hex::encode(&header_hash),
-                hex::encode(&justification.target_hash),
+                hex::encode(header_hash),
+                hex::encode(justification.target_hash),
             ));
         }
 
@@ -76,8 +75,7 @@ impl GrandpaState {
         if justification.target_number != header.number {
             return Err(format!(
                 "justification target_number mismatch: header #{}, justification #{}",
-                header.number, 
-                justification.target_number,
+                header.number, justification.target_number,
             ));
         }
 
@@ -119,18 +117,15 @@ impl GrandpaState {
         // common parent of these blocks.
         let valid_targets = build_ancestry_set(justification);
 
-        let authority_set: HashMap<[u8; 32], u64> = self
-            .authorities
-            .iter()
-            .map(|(k, w)| (*k,*w))
-            .collect();
+        let authority_set: HashMap<[u8; 32], u64> =
+            self.authorities.iter().map(|(k, w)| (*k, *w)).collect();
         let total_weight: u64 = self.authorities.iter().map(|(_, w)| w).sum();
 
         // Byzantine fault tolerance requires strictly more than 2/3 of total weight.
         // Integer equivalent: signed_weight > floor(2*total/3), i.e. >= floor(2*total/3)+1.
         let threshold = (total_weight * 2) / 3;
 
-        // Now, add valid signatures to the signed weight, 
+        // Now, add valid signatures to the signed weight,
         // disallowing duplicate authorities.
         let mut signed_weight: u64 = 0;
         let mut seen_authorities = HashSet::new();
@@ -144,7 +139,7 @@ impl GrandpaState {
                     "justification precommit invalid: authority {} is not in the authority set",
                     hex::encode(precommit.authority_id)
                 );
-                continue
+                continue;
             };
 
             // Ignore duplicate precommits from the same authority. Without
@@ -155,7 +150,7 @@ impl GrandpaState {
                     "justification precommit invalid: authority {} has already appeared in justification",
                     hex::encode(precommit.authority_id)
                 );
-                continue
+                continue;
             }
 
             // Only count weight for precommits targeting the justification block or a
@@ -171,11 +166,8 @@ impl GrandpaState {
 
             // Verify the ed25519 signature. The signed message binds the vote to a
             // specific (round, set_id) pair, preventing cross-round/cross-set replays.
-            if let Err(_e) = verify_precommit_signature(
-                precommit,
-                justification.round,
-                self.set_id,
-            ) {
+            if let Err(_e) = verify_precommit_signature(precommit, justification.round, self.set_id)
+            {
                 tracing::debug!(
                     "justification precommit invalid: precommit by authority {} has an invalid signature",
                     hex::encode(precommit.authority_id),
@@ -191,7 +183,7 @@ impl GrandpaState {
             // enough valid signatures that can't be faked, and we trust the threshold
             // that we are aiming for, so bail and save some effort.
             if signed_weight > threshold {
-                return Ok(())
+                return Ok(());
             }
         }
 
@@ -202,7 +194,6 @@ impl GrandpaState {
             signed_weight, threshold,
         ))
     }
-
 }
 
 /// Extract GRANDPA authority change from a header digest, ignoring the delay.
@@ -210,13 +201,14 @@ impl GrandpaState {
 /// the block where the change is enacted).
 fn find_warp_sync_grandpa_authority_change(header: &BlockHeader) -> Option<Vec<([u8; 32], u64)>> {
     for log in &header.digest.logs {
-        if let BlockDigestItem::Consensus(engine, data) = log {
-            if engine.is_grandpa() && let Ok(msg) = GrandpaConsensusMessage::decode(&mut &**data) {
-                match msg {
-                    GrandpaConsensusMessage::ScheduledChange { authorities, .. }
-                    | GrandpaConsensusMessage::ForcedChange { authorities, .. } => {
-                        return Some(authorities);
-                    }
+        if let BlockDigestItem::Consensus(engine, data) = log
+            && engine.is_grandpa()
+            && let Ok(msg) = GrandpaConsensusMessage::decode(&mut &**data)
+        {
+            match msg {
+                GrandpaConsensusMessage::ScheduledChange { authorities, .. }
+                | GrandpaConsensusMessage::ForcedChange { authorities, .. } => {
+                    return Some(authorities);
                 }
             }
         }
@@ -236,7 +228,8 @@ fn verify_precommit_signature(
         target_number: precommit.target_number,
         round,
         set_id,
-    }.encode();
+    }
+    .encode();
 
     let public_key = ed25519_dalek::VerifyingKey::from_bytes(&precommit.authority_id)
         .map_err(|e| format!("invalid public key: {}", e))?;
@@ -307,8 +300,8 @@ struct SignerPayload {
 // The shape of the bytes we receive when asking for warp sync details.
 mod wire_format {
     use super::AuthorityId;
-    use parity_scale_codec::{Encode, Decode};
-    use crate::polkadot::{BlockHeader, BlockHash};
+    use crate::polkadot::{BlockHash, BlockHeader};
+    use parity_scale_codec::{Decode, Encode};
 
     #[derive(Encode, Decode, Debug)]
     pub struct WarpSyncResponse {
