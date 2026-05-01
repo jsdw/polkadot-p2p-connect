@@ -6,7 +6,7 @@ use core::time::Duration;
 use parity_scale_codec::Encode;
 use polkadot_p2p_connect::{
     AsyncRead, AsyncReadError, AsyncWrite, AsyncWriteError, Configuration, Message, PlatformT,
-    RequestProtocol, RequestResponse, RequestResponseError, SubscriptionProtocol,
+    RequestProtocol, RequestResponse, SubscriptionProtocol,
     SubscriptionResponse,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -87,23 +87,6 @@ async fn main() -> anyhow::Result<()> {
             .with_timeout(Duration::from_secs(60)),
     );
 
-    // Connect to a Polkadot bootnode via TCP.
-    eprintln!("Connecting to polkadot-bootnode-0.polkadot.io:30333...");
-    let tcp = TcpStream::connect(("polkadot-bootnode-0.polkadot.io", 30333)).await?;
-    let (read_half, write_half) = tcp.into_split();
-    let mut conn = config
-        .connect(TokioTcpReader(read_half), TokioTcpWriter(write_half))
-        .await?;
-
-    eprintln!(
-        "Connected! Us: {}, Them: {}",
-        conn.our_id(),
-        conn.their_id()
-    );
-
-    // Subscribe to block announces (needed for the peer to maintain the connection).
-    conn.subscribe(block_announce_id)?;
-
     // Initialize GRANDPA state from genesis.
     let mut grandpa_state = GrandpaState {
         authorities: GENESIS_AUTHORITIES.to_vec(),
@@ -112,94 +95,96 @@ async fn main() -> anyhow::Result<()> {
         finalized_hash: GENESIS_HASH,
     };
 
-    // Drive the connection event loop. We wait for the block-announces subscription
-    // to open (indicating the peer considers us connected), then begin making warp
-    // sync requests until we've caught up to the latest finalized block.
-    while let Some(result) = conn.next().await {
-        match result? {
-            // Block announce subscription events:
-            Message::Notification {
-                protocol_id,
-                res: SubscriptionResponse::Opened,
-            } if protocol_id == block_announce_id => {
-                eprintln!("Block announce subscription opened, starting warp sync...");
-                eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
-                conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
-            }
-            Message::Notification {
-                protocol_id,
-                res: SubscriptionResponse::Closed,
-            } if protocol_id == block_announce_id => {
-                anyhow::bail!("Block announce subscription closed by peer");
-            }
-            Message::Notification {
-                protocol_id,
-                res: SubscriptionResponse::Error(e),
-            } if protocol_id == block_announce_id => {
-                anyhow::bail!("Block announce subscription error: {e}");
-            }
+    // loop this bit in case we get rate limited and need to retry the connection.
+    loop {
+        // Connect to a Polkadot bootnode via TCP.
+        let tcp = TcpStream::connect(("polkadot-bootnode-0.polkadot.io", 30333)).await?;
+        let (read_half, write_half) = tcp.into_split();
+        let mut conn = config
+            .connect(TokioTcpReader(read_half), TokioTcpWriter(write_half))
+            .await?;
+    
+        eprintln!(
+            "Connected! Us: {}, Them: {}",
+            conn.our_id(),
+            conn.their_id()
+        );
+    
+        // Subscribe to block announces (needed for the peer to maintain the connection).
+        conn.subscribe(block_announce_id)?;
 
-            // Warp sync responses:
-            Message::Response {
-                protocol_id,
-                res: RequestResponse::Value(bytes),
-                ..
-            } if protocol_id == warp_sync_id => {
-                let is_finished = grandpa_state
-                    .update_with_warp_sync_response(&bytes)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                eprintln!(
-                    "  Warp sync progress: block #{}, set_id={}, {} authorities",
-                    grandpa_state.finalized_number,
-                    grandpa_state.set_id,
-                    grandpa_state.authorities.len(),
-                );
-
-                if is_finished {
-                    eprintln!(
-                        "Warp sync complete! Finalized block #{}, hash=0x{}",
-                        grandpa_state.finalized_number,
-                        hex::encode(grandpa_state.finalized_hash),
-                    );
-                    return Ok(());
+        // Drive the connection event loop. We wait for the block-announces subscription
+        // to open (indicating the peer considers us connected), then begin making warp
+        // sync requests until we've caught up to the latest finalized block.
+        while let Some(result) = conn.next().await {
+            match result? {
+                // Block announce subscription events:
+                Message::Notification {
+                    protocol_id,
+                    res: SubscriptionResponse::Opened,
+                } if protocol_id == block_announce_id => {
+                    eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
+                    conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
                 }
-
-                // Not finished yet; request the next chunk from our new finalized hash.
-                eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
-                conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
+                Message::Notification {
+                    protocol_id,
+                    res: SubscriptionResponse::Closed,
+                } if protocol_id == block_announce_id => {
+                    anyhow::bail!("Block announce subscription closed by peer");
+                }
+                Message::Notification {
+                    protocol_id,
+                    res: SubscriptionResponse::Error(e),
+                } if protocol_id == block_announce_id => {
+                    anyhow::bail!("Block announce subscription error: {e}");
+                }
+    
+                // Warp sync responses:
+                Message::Response {
+                    protocol_id,
+                    res: RequestResponse::Value(bytes),
+                    ..
+                } if protocol_id == warp_sync_id => {
+                    let is_finished = grandpa_state
+                        .update_with_warp_sync_response(&bytes)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+    
+                    eprintln!(
+                        "  Warp sync progress: block #{}, set_id={}, {} authorities",
+                        grandpa_state.finalized_number,
+                        grandpa_state.set_id,
+                        grandpa_state.authorities.len(),
+                    );
+    
+                    if is_finished {
+                        eprintln!(
+                            "Warp sync complete! Finalized block #{}, hash=0x{}",
+                            grandpa_state.finalized_number,
+                            hex::encode(grandpa_state.finalized_hash),
+                        );
+                        return Ok(());
+                    }
+    
+                    // Not finished yet; request the next chunk from our new finalized hash.
+                    eprintln!("Requesting warp sync from #{}", grandpa_state.finalized_number);
+                    conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
+                }
+                Message::Response {
+                    protocol_id,
+                    res: RequestResponse::Error(_e),
+                    ..
+                } if protocol_id == warp_sync_id => {
+                    // Break the while loop to retry.
+                    break
+                }
+    
+                // Ignore all other messages (block announce values, etc).
+                _ => {}
             }
-            Message::Response {
-                protocol_id,
-                res: RequestResponse::Error(
-                    e @ (RequestResponseError::ProtocolRejected
-                    | RequestResponseError::ClosedByRemote),
-                ),
-                ..
-            } if protocol_id == warp_sync_id => {
-                eprintln!("Warp sync request failed ({e}), retrying after delay...");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                conn.request(warp_sync_id, grandpa_state.finalized_hash.to_vec())?;
-            }
-            Message::Response {
-                protocol_id,
-                res: RequestResponse::Error(e),
-                ..
-            } if protocol_id == warp_sync_id => {
-                anyhow::bail!("Warp sync request failed: {e}");
-            }
-            Message::Response {
-                protocol_id,
-                res: RequestResponse::Cancelled,
-                ..
-            } if protocol_id == warp_sync_id => {
-                anyhow::bail!("Warp sync request was cancelled");
-            }
-
-            // Ignore all other messages (block announce values, etc).
-            _ => {}
         }
-    }
 
-    anyhow::bail!("Connection closed before warp sync completed");
+        // If we get here we'll retry with a new connection.
+        eprintln!("Connection closed or error before warp sync completed; retrying after delay (probably rate limited)");
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    }
 }
