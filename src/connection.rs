@@ -165,8 +165,8 @@ pub enum RequestResponseError {
     Timeout,
     #[error("the remote rejected the protocol we handed it")]
     ProtocolRejected,
-    #[error("the remote rejected the payload we handed it")]
-    PayloadRejected,
+    #[error("the remote closed the stream and didn't send a response")]
+    ClosedByRemote,
     #[error("the remote payload is too large")]
     RemotePayloadTooLarge,
     #[error("the remote did not follow our multistream request-response protocol")]
@@ -598,7 +598,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static, Platform: PlatformT>
                             OutputState::Closed(reason) => {
                                 self.inflight_requests.remove(&stream_id);
                                 let error = match reason {
-                                    CloseReason::ClosedByRemote => RequestResponseError::PayloadRejected,
+                                    CloseReason::ClosedByRemote => RequestResponseError::ClosedByRemote,
                                     CloseReason::IncomingMessageTooLarge => RequestResponseError::RemotePayloadTooLarge,
                                 };
                                 return Ok(Some(Message::Response {
