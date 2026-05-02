@@ -20,9 +20,9 @@ pub struct ReadWriteJoin<T, E> {
 impl<T, E> ReadWriteJoin<T, E> {
     /// Create a new, empty [`ReadWriteJoin`]. Use [`ReadWriteJoin::call`] to
     /// start executing a pair of futures.
-    pub fn new<WriteFut>(write_fut: WriteFut) -> Self 
+    pub fn new<WriteFut>(write_fut: WriteFut) -> Self
     where
-        WriteFut: Future<Output = Result<Never, E>> + 'static
+        WriteFut: Future<Output = Result<Never, E>> + 'static,
     {
         ReadWriteJoin {
             write_errored: false,
@@ -35,10 +35,7 @@ impl<T, E> ReadWriteJoin<T, E> {
     /// a write future, this returns a future which will drive both internally until the
     /// read future returns a value. This returned future can be cancelled and will resume
     /// when this is called again.
-    pub fn call<ReadFn, ReadFut>(
-        &mut self,
-        read_fn: ReadFn,
-    ) -> impl Future<Output = Result<T, E>>
+    pub fn call<ReadFn, ReadFut>(&mut self, read_fn: ReadFn) -> impl Future<Output = Result<T, E>>
     where
         ReadFn: Fn() -> ReadFut,
         ReadFut: Future<Output = Result<T, E>> + 'static,
@@ -57,7 +54,7 @@ impl<T, E> ReadWriteJoin<T, E> {
                         // Nothing to do here; will be polled again when ready.
                     }
                     Poll::Ready(Err(e)) => {
-                        // Error; replace the rad future and return.
+                        // Error; replace the read future and return.
                         self.write_errored = true;
                         self.read_fut = Some(read_fut);
                         return Poll::Ready(Err(e));
@@ -71,12 +68,8 @@ impl<T, E> ReadWriteJoin<T, E> {
                     self.read_fut = Some(read_fut);
                     Poll::Pending
                 }
-                Poll::Ready(Err(e)) => {
-                    Poll::Ready(Err(e))
-                }
-                Poll::Ready(Ok(val)) => {
-                    Poll::Ready(Ok(val))
-                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Ok(val)) => Poll::Ready(Ok(val)),
             }
         })
     }

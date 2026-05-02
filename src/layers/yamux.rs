@@ -9,8 +9,8 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::task::Waker;
 use core::cell::{Ref, RefCell};
+use core::task::Waker;
 use header::{FrameFlag, FrameType, GoAwayType, YamuxHeader};
 
 // Re-export types in the API
@@ -84,11 +84,11 @@ struct SharedState {
     write_buf: VecDeque<u8>,
     output_buf: Option<Output>,
     has_pending_writes: bool,
-    pending_write_waker: Option<Waker>
+    pending_write_waker: Option<Waker>,
 }
 
 impl SharedState {
-    fn needs_write(&mut self) {
+    fn flush_writes(&mut self) {
         self.has_pending_writes = true;
         if let Some(waker) = self.pending_write_waker.take() {
             waker.wake();
@@ -197,10 +197,11 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
             pending_write_waker: None,
         }));
 
-        let writer_shared_state = shared_state.clone(); 
-        let read_write_join = ReadWriteJoin::new(async move {
-            Self::write_next(&mut writer, &writer_shared_state).await
-        });
+        let writer_shared_state = shared_state.clone();
+        let read_write_join =
+            ReadWriteJoin::new(
+                async move { Self::write_next(&mut writer, &writer_shared_state).await },
+            );
 
         Self {
             reader: Rc::new(RefCell::new(reader)),
@@ -236,7 +237,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
         stream.outbound_buf.push_back(BufferedOutboundMessage::Open);
 
         // Trigger writes if needed.
-        shared_state.needs_write();
+        shared_state.flush_writes();
 
         stream_id
     }
@@ -271,7 +272,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
         }
 
         // Trigger writes if needed.
-        shared_state.needs_write();
+        shared_state.flush_writes();
 
         Ok(())
     }
@@ -295,7 +296,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                 .push_back(BufferedOutboundMessage::Close);
 
             // Trigger writes if needed.
-            shared_state.needs_write();
+            shared_state.flush_writes();
         }
     }
 
@@ -317,7 +318,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
             .push_back(BufferedOutboundMessage::Close);
 
         // Trigger writes if needed.
-        shared_state.needs_write();
+        shared_state.flush_writes();
     }
 
     /// Schedule the stream to be closed immediately via the more aggressive RST flag. This ignores any
@@ -358,7 +359,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
         stream.open_state = OpenState::Reset;
 
         // Trigger writes if needed.
-        shared_state.needs_write();
+        shared_state.flush_writes();
     }
 
     /// Drive our session, returning the next chunk of bytes on any given stream.
@@ -405,21 +406,19 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn next_inner(&mut self) -> Result<Option<Output>, Error> {
         self.read_write_join
-            .call(
-                || {
-                    let reader = self.reader.clone();
-                    let read_buf = self.inbound_buf.clone();
-                    let reader_state = self.shared_state.clone();
-                    async move {
-                        Self::read_next(
-                            &mut reader.borrow_mut(),
-                            &reader_state,
-                            &mut read_buf.borrow_mut(),
-                        )
-                        .await
-                    }
-                },
-            )
+            .call(|| {
+                let reader = self.reader.clone();
+                let read_buf = self.inbound_buf.clone();
+                let reader_state = self.shared_state.clone();
+                async move {
+                    Self::read_next(
+                        &mut reader.borrow_mut(),
+                        &reader_state,
+                        &mut read_buf.borrow_mut(),
+                    )
+                    .await
+                }
+            })
             .await
     }
 
@@ -524,6 +523,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                         stream
                             .outbound_buf
                             .push_back(BufferedOutboundMessage::WindowUpdate(delta as u32));
+                        shared_state.flush_writes();
                     }
 
                     if data_len == 0 && is_new {
@@ -592,17 +592,27 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                         // but we'll still accept window updates and can send to them.
                         // If the stream is SYN then it's just been opened; tell the user this.
                         stream.open_state = stream.open_state.set_fin_by_them();
+
+                        // Window update means we may be able to write more, so try.
+                        shared_state.flush_writes();
+
                         return Ok(Some(Output {
                             stream_id,
                             state: OutputState::ClosedByRemote,
                         }));
                     } else if is_new {
+                        // Window update means we may be able to write more, so try.
+                        shared_state.flush_writes();
+
                         // This is a new stream, so emit a message that it is opened. New streams
                         // will never conflict with RST/FIN flags.
                         return Ok(Some(Output {
                             stream_id,
                             state: OutputState::OpenedByRemote,
                         }));
+                    } else {
+                        // Window update means we may be able to write more, so try.
+                        shared_state.flush_writes();
                     }
                 }
                 FrameType::Ping => {
@@ -624,6 +634,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                     shared_state
                         .write_buf
                         .extend(&YamuxHeader::pong(stream_id, hdr.length).encode());
+                    shared_state.flush_writes();
                 }
                 FrameType::GoAway => {
                     tracing::debug!(target: LOG_TARGET, "received GO AWAY on stream {stream_id} (flags: {flags})");
@@ -661,7 +672,10 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
     }
 
     /// Send as much of our buffered data as we can, draining any write buffers.
-    async fn write_next(writer: &mut W, shared_state: &RefCell<SharedState>) -> Result<crate::utils::read_write_join::Never, Error> {
+    async fn write_next(
+        writer: &mut W,
+        shared_state: &RefCell<SharedState>,
+    ) -> Result<crate::utils::read_write_join::Never, Error> {
         loop {
             // Reset this; at the end we'll see if it's been set to true again
             // to know whether to loop or wait.
@@ -675,17 +689,17 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                 writer.write_all(a).await?;
                 writer.write_all(b).await?;
             }
-    
+
             // Find and handle all of our stream-specific messages. Make sure not to hold
             // shared_state across any await points.
             let mut bytes_to_write = Vec::new();
             let mut streams_to_remove = Vec::new();
-    
+
             {
                 let mut old_bytes_to_write_len = usize::MAX;
                 let mut shared_state = shared_state.borrow_mut();
                 let streams = &mut shared_state.streams;
-    
+
                 // Buffer as much as we possibly can to write, because when we are done here we need to wait for the
                 // next read event to come in before we can write more. This might be an issue if we are waiting
                 // a while for a read event but haven't actually written everything we can write yet.
@@ -694,16 +708,17 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                     // more bytes in this loop then we'll end up looping again. If we don't then
                     // there is nothing more we can write yet so we end.
                     old_bytes_to_write_len = bytes_to_write.len();
-    
+
                     for (&stream_id, stream) in streams.iter_mut() {
                         let Some(msg) = stream.outbound_buf.pop_front() else {
                             continue;
                         };
-    
+
                         match msg {
                             BufferedOutboundMessage::Accept => {
                                 tracing::debug!(target: LOG_TARGET, "accepting stream {stream_id}");
-                                bytes_to_write.extend(YamuxHeader::accept_stream(stream_id).encode());
+                                bytes_to_write
+                                    .extend(YamuxHeader::accept_stream(stream_id).encode());
                             }
                             BufferedOutboundMessage::Open => {
                                 tracing::debug!(target: LOG_TARGET, "opening stream {stream_id}");
@@ -711,8 +726,9 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                             }
                             BufferedOutboundMessage::Close => {
                                 tracing::debug!(target: LOG_TARGET, "closing stream {stream_id} (FIN)");
-                                bytes_to_write.extend(YamuxHeader::close_stream(stream_id).encode());
-    
+                                bytes_to_write
+                                    .extend(YamuxHeader::close_stream(stream_id).encode());
+
                                 // Note: we are sending FIN to the other side to close our half, but
                                 // don't want to entirely close the stream because we may still be waiting to
                                 // receive some data back. So, ensure the open_state is correct now but don't remove.
@@ -720,7 +736,8 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                             }
                             BufferedOutboundMessage::Reset => {
                                 tracing::debug!(target: LOG_TARGET, "closing stream {stream_id} (RST)");
-                                bytes_to_write.extend(YamuxHeader::reset_stream(stream_id).encode());
+                                bytes_to_write
+                                    .extend(YamuxHeader::reset_stream(stream_id).encode());
                                 streams_to_remove.push(stream_id);
                             }
                             BufferedOutboundMessage::WindowUpdate(len) => {
@@ -735,7 +752,7 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                                     .min(stream.send_window)
                                     .min(MAX_SEND_SIZE);
                                 tracing::debug!(target: LOG_TARGET, "sending {bytes_to_send} DATA bytes on stream {stream_id}");
-    
+
                                 // If we can't send anything on this stream, put the message back on the queue and break
                                 // to stop pulling items from this streams queue. We need a window update before we can
                                 // send more data on this stream.
@@ -745,17 +762,18 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                                         .push_back(BufferedOutboundMessage::Data(outbound_data));
                                     continue;
                                 }
-    
+
                                 // VecDeque is two slices internally, so we work out how many bytes of
                                 // each slice we need to send to satisfy the above.
                                 let (a, b) = outbound_data.as_slices();
                                 let a_len = usize::min(bytes_to_send, a.len());
                                 let b_len = bytes_to_send.saturating_sub(a.len());
-    
+
                                 // Send the appropriate header and then the corresponding bytes. Because
                                 // we have two slices above, we break this into two sends if necessary.
-                                bytes_to_write
-                                    .extend(YamuxHeader::send_data(stream_id, a_len as u32).encode());
+                                bytes_to_write.extend(
+                                    YamuxHeader::send_data(stream_id, a_len as u32).encode(),
+                                );
                                 bytes_to_write.extend(&a[..a_len]);
                                 if b_len > 0 {
                                     bytes_to_write.extend(
@@ -763,11 +781,12 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                                     );
                                     bytes_to_write.extend(&b[..b_len]);
                                 }
-    
+
                                 // Decrement the send window. When this runs out we'll be forced to
                                 // wait for a window update from them before we can send more.
-                                stream.send_window = stream.send_window.saturating_sub(bytes_to_send);
-    
+                                stream.send_window =
+                                    stream.send_window.saturating_sub(bytes_to_send);
+
                                 // If we didn't send all of the bytes, then drain what we did send and put
                                 // the message back onto the front of the queue to be tried again later.
                                 if bytes_to_send != outbound_data.len() {
@@ -780,12 +799,12 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                         }
                     }
                 }
-    
+
                 for stream_id in streams_to_remove {
                     streams.remove(&stream_id);
                 }
             }
-    
+
             // Perform a single write at the end with everything, to:
             // a) avoid holding onto our shared state across an await point,
             // b) can be more efficient doing one write instead of many.
@@ -793,15 +812,19 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
                 writer.write_all(&bytes_to_write).await?;
             }
 
-            if !shared_state.borrow_mut().has_pending_writes {
-                // If no pending writes, then instead of spinning in a loop we save
-                // the current waker and return Pending. When any writes need doing, this
-                // waker will be woken so we can loop again.
-                core::future::poll_fn::<(),_>(move |cx| {
-                    shared_state.borrow_mut().pending_write_waker = Some(cx.waker().clone());
+            // If no pending writes, then instead of spinning in a loop we save
+            // the current waker and return Pending. When any writes need doing, this
+            // waker will be woken so we can loop again.
+            core::future::poll_fn::<(), _>(|cx| {
+                let mut state = shared_state.borrow_mut();
+                if state.has_pending_writes {
+                    core::task::Poll::Ready(())
+                } else {
+                    state.pending_write_waker = Some(cx.waker().clone());
                     core::task::Poll::Pending
-                }).await;
-            }
+                }
+            })
+            .await;
         }
     }
 
@@ -816,6 +839,8 @@ impl<R: AsyncRead + 'static, W: AsyncWrite + 'static> YamuxSession<R, W> {
         hdr: &YamuxHeader,
         shared_state: &'a mut SharedState,
     ) -> Result<Option<&'a mut StreamState>, Error> {
+        // We'll likely want to flush writes after this.
+        shared_state.flush_writes();
         let stream_id = hdr.stream_id;
 
         // they should always send even stream ID numbers, and not the session ID number.
